@@ -1,5 +1,6 @@
-// biome-ignore-all assist/source/organizeImports: ANT-ONLY import markers must not be reordered
+// biome-ignore-all assist/source/organizeImports: internal-only import markers must not be reordered
 import { getInitialMainLoopModel } from '../../bootstrap/state.js'
+import { getAdditionalModelOptionsCacheScope } from '../../services/api/providerConfig.js'
 import {
   isClaudeAISubscriber,
   isMaxSubscriber,
@@ -32,6 +33,7 @@ import {
 } from './model.js'
 import { has1mContext } from '../context.js'
 import { getGlobalConfig } from '../config.js'
+import { getActiveOpenAIModelOptionsCache } from '../providerProfiles.js'
 import { getCachedOllamaModelOptions, isOllamaProvider } from './ollamaModels.js'
 
 // @[MODEL LAUNCH]: Update all the available and default model option strings below.
@@ -41,6 +43,25 @@ export type ModelOption = {
   label: string
   description: string
   descriptionForModel?: string
+}
+
+function getScopedAdditionalModelOptions(): ModelOption[] {
+  const config = getGlobalConfig()
+  const activeScope = getAdditionalModelOptionsCacheScope()
+
+  if (!activeScope) {
+    return []
+  }
+
+  if (config.additionalModelOptionsCacheScope !== undefined) {
+    return config.additionalModelOptionsCacheScope === activeScope
+      ? (config.additionalModelOptionsCache ?? [])
+      : []
+  }
+
+  return activeScope === 'firstParty'
+    ? (config.additionalModelOptionsCache ?? [])
+    : []
 }
 
 export function getDefaultOptionForUser(fastMode = false): ModelOption {
@@ -331,6 +352,18 @@ function getCodexModelOptions(): ModelOption[] {
 // @[MODEL LAUNCH]: Update the model picker lists below to include/reorder options for the new model.
 // Each user tier (ant, Max/Team Premium, Pro/Team Standard/Enterprise, PAYG 1P, PAYG 3P) has its own list.
 function getModelOptionsBase(fastMode = false): ModelOption[] {
+  if (getAPIProvider() === 'github') {
+    const githubModel = process.env.OPENAI_MODEL?.trim() || 'github:copilot'
+    return [
+      getDefaultOptionForUser(fastMode),
+      {
+        value: githubModel,
+        label: githubModel,
+        description: 'GitHub Models default',
+      },
+    ]
+  }
+
   // When using Ollama, show models from the Ollama server instead of Claude models
   if (getAPIProvider() === 'openai' && isOllamaProvider()) {
     const defaultOption = getDefaultOptionForUser(fastMode)
@@ -358,7 +391,7 @@ function getModelOptionsBase(fastMode = false): ModelOption[] {
     const antModelOptions: ModelOption[] = getAntModels().map(m => ({
       value: m.alias,
       label: m.label,
-      description: m.description ?? `[ANT-ONLY] ${m.label} (${m.model})`,
+      description: m.description ?? `[internal] ${m.label} (${m.model})`,
     }))
 
     return [
@@ -405,6 +438,16 @@ function getModelOptionsBase(fastMode = false): ModelOption[] {
 
     standardOptions.push(MaxHaiku45Option)
     return standardOptions
+  }
+
+  if (getAdditionalModelOptionsCacheScope()?.startsWith('openai:')) {
+    const activeOpenAIOptions = getActiveOpenAIModelOptionsCache()
+    return [
+      getDefaultOptionForUser(fastMode),
+      ...(activeOpenAIOptions.length > 0
+        ? activeOpenAIOptions
+        : getScopedAdditionalModelOptions()),
+    ]
   }
 
   // PAYG 1P API: Default (Sonnet) + Sonnet 1M + Opus 4.6 + Opus 1M + Haiku
@@ -548,6 +591,10 @@ function getKnownModelOption(model: string): ModelOption | null {
 }
 
 export function getModelOptions(fastMode = false): ModelOption[] {
+  if (getAPIProvider() === 'github') {
+    return filterModelOptionsByAllowlist(getModelOptionsBase(fastMode))
+  }
+
   const options = getModelOptionsBase(fastMode)
 
   // Add the custom model from the ANTHROPIC_CUSTOM_MODEL_OPTION env var
@@ -566,7 +613,7 @@ export function getModelOptions(fastMode = false): ModelOption[] {
   }
 
   // Append additional model options fetched during bootstrap
-  for (const opt of getGlobalConfig().additionalModelOptionsCache ?? []) {
+  for (const opt of getScopedAdditionalModelOptions()) {
     if (!options.some(existing => existing.value === opt.value)) {
       options.push(opt)
     }

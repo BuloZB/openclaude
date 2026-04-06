@@ -2,6 +2,7 @@ import * as React from 'react'
 
 import type { LocalJSXCommandCall, LocalJSXCommandOnDone } from '../../types/command.js'
 import { COMMON_HELP_ARGS, COMMON_INFO_ARGS } from '../../constants/xml.js'
+import { ProviderManager } from '../../components/ProviderManager.js'
 import TextInput from '../../components/TextInput.js'
 import {
   Select,
@@ -14,6 +15,7 @@ import { Box, Text } from '../../ink.js'
 import {
   DEFAULT_CODEX_BASE_URL,
   DEFAULT_OPENAI_BASE_URL,
+  isLocalProviderUrl,
   resolveCodexApiCredentials,
   resolveProviderRequest,
 } from '../../services/api/providerConfig.js'
@@ -51,7 +53,11 @@ import {
   recommendOllamaModel,
   type RecommendationGoal,
 } from '../../utils/providerRecommendation.js'
-import { hasLocalOllama, listOllamaModels } from '../../utils/providerDiscovery.js'
+import {
+  getLocalOpenAICompatibleProviderLabel,
+  hasLocalOllama,
+  listOllamaModels,
+} from '../../utils/providerDiscovery.js'
 
 type ProviderChoice = 'auto' | ProviderProfile | 'clear'
 
@@ -172,6 +178,23 @@ export function buildCurrentProviderSummary(options?: {
     }
   }
 
+  if (isEnvTruthy(processEnv.CLAUDE_CODE_USE_GITHUB)) {
+    return {
+      providerLabel: 'GitHub Models',
+      modelLabel: getSafeDisplayValue(
+        processEnv.OPENAI_MODEL ?? 'github:copilot',
+        processEnv,
+      ),
+      endpointLabel: getSafeDisplayValue(
+        processEnv.OPENAI_BASE_URL ??
+          processEnv.OPENAI_API_BASE ??
+          'https://models.github.ai/inference',
+        processEnv,
+      ),
+      savedProfileLabel,
+    }
+  }
+
   if (isEnvTruthy(processEnv.CLAUDE_CODE_USE_OPENAI)) {
     const request = resolveProviderRequest({
       model: processEnv.OPENAI_MODEL,
@@ -181,10 +204,8 @@ export function buildCurrentProviderSummary(options?: {
     let providerLabel = 'OpenAI-compatible'
     if (request.transport === 'codex_responses') {
       providerLabel = 'Codex'
-    } else if (request.baseUrl.includes('localhost:11434')) {
-      providerLabel = 'Ollama'
-    } else if (request.baseUrl.includes('localhost:1234')) {
-      providerLabel = 'LM Studio'
+    } else if (isLocalProviderUrl(request.baseUrl)) {
+      providerLabel = getLocalOpenAICompatibleProviderLabel(request.baseUrl)
     }
 
     return {
@@ -271,16 +292,20 @@ function buildSavedProfileSummary(
         ),
       }
     case 'openai':
-    default:
+    default: {
+      const baseUrl = env.OPENAI_BASE_URL ?? DEFAULT_OPENAI_BASE_URL
+
       return {
-        providerLabel: 'OpenAI-compatible',
+        providerLabel: isLocalProviderUrl(baseUrl)
+          ? getLocalOpenAICompatibleProviderLabel(baseUrl)
+          : 'OpenAI-compatible',
         modelLabel: getSafeDisplayValue(
           env.OPENAI_MODEL ?? 'gpt-4o',
           process.env,
           env,
         ),
         endpointLabel: getSafeDisplayValue(
-          env.OPENAI_BASE_URL ?? DEFAULT_OPENAI_BASE_URL,
+          baseUrl,
           process.env,
           env,
         ),
@@ -289,6 +314,7 @@ function buildSavedProfileSummary(
             ? 'configured'
             : undefined,
       }
+    }
   }
 }
 
@@ -1289,22 +1315,34 @@ export function ProviderWizard({
 }
 
 export const call: LocalJSXCommandCall = async (onDone, _context, args) => {
-  const normalizedArgs = args?.trim().toLowerCase() || ''
+  const trimmedArgs = args?.trim().toLowerCase() ?? ''
 
-  if (COMMON_INFO_ARGS.includes(normalizedArgs)) {
-    onDone(buildUsageText(), { display: 'system' })
-    return null
+  if (
+    COMMON_HELP_ARGS.includes(trimmedArgs) ||
+    COMMON_INFO_ARGS.includes(trimmedArgs) ||
+    trimmedArgs === 'help' ||
+    trimmedArgs === '--help' ||
+    trimmedArgs === '-h'
+  ) {
+    onDone(
+      'Run /provider to add, edit, delete, or activate provider profiles. The active provider controls base URL, model, and API key.',
+      { display: 'system' },
+    )
+    return
   }
 
-  if (COMMON_HELP_ARGS.includes(normalizedArgs)) {
-    onDone(buildUsageText(), { display: 'system' })
-    return null
-  }
+  return (
+    <ProviderManager
+      mode="manage"
+      onDone={result => {
+        const message =
+          result?.message ??
+          (result?.action === 'saved'
+            ? 'Provider profile updated'
+            : 'Provider manager closed')
 
-  if (normalizedArgs) {
-    onDone('Usage: /provider', { display: 'system' })
-    return null
-  }
-
-  return <ProviderWizard onDone={onDone} />
+        onDone(message, { display: 'system' })
+      }}
+    />
+  )
 }
