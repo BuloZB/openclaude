@@ -15,6 +15,7 @@ import {
 } from './providerRecommendation.js'
 import { readGeminiAccessToken } from './geminiCredentials.js'
 import { getOllamaChatBaseUrl } from './providerDiscovery.js'
+import { getPrimaryModel } from './providerModels.js'
 import { getProviderValidationError } from './providerValidation.js'
 import {
   maskSecretForDisplay,
@@ -22,6 +23,7 @@ import {
   sanitizeApiKey,
   sanitizeProviderConfigValue,
 } from './providerSecrets.js'
+import { getPrimaryModel } from './providerModels.js'
 
 export {
   maskSecretForDisplay,
@@ -42,6 +44,7 @@ export const DEFAULT_MISTRAL_MODEL = 'devstral-latest'
 
 const PROFILE_ENV_KEYS = [
   'CLAUDE_CODE_USE_OPENAI',
+  'CLAUDE_CODE_USE_GITHUB',
   'CLAUDE_CODE_USE_GEMINI',
   'CLAUDE_CODE_USE_MISTRAL',
   'CLAUDE_CODE_USE_BEDROCK',
@@ -69,6 +72,9 @@ const PROFILE_ENV_KEYS = [
   'MISTRAL_BASE_URL',
   'MISTRAL_API_KEY',
   'MISTRAL_MODEL',
+  'BANKR_BASE_URL',
+  'BNKR_API_KEY',
+  'BANKR_MODEL',
 ] as const
 
 const SECRET_ENV_KEYS = [
@@ -79,6 +85,7 @@ const SECRET_ENV_KEYS = [
   'NVIDIA_API_KEY',
   'MINIMAX_API_KEY',
   'MISTRAL_API_KEY',
+  'BNKR_API_KEY',
 ] as const
 
 export type ProviderProfile = 'openai' | 'ollama' | 'codex' | 'gemini' | 'atomic-chat' | 'nvidia-nim' | 'minimax' | 'mistral'
@@ -104,6 +111,9 @@ export type ProfileEnv = {
   MISTRAL_BASE_URL?: string
   MISTRAL_API_KEY?: string
   MISTRAL_MODEL?: string
+  BANKR_BASE_URL?: string
+  BNKR_API_KEY?: string
+  BANKR_MODEL?: string
 }
 
 export type ProfileFile = {
@@ -120,7 +130,8 @@ type SecretValueSource = Partial<
     | 'GOOGLE_API_KEY'
     | 'NVIDIA_API_KEY'
     | 'MINIMAX_API_KEY'
-    | 'MISTRAL_API_KEY',
+    | 'MISTRAL_API_KEY'
+    | 'BNKR_API_KEY',
     string | undefined
   >
 >
@@ -136,6 +147,18 @@ function resolveProfileFilePath(options?: ProfileFileLocation): string {
   }
 
   return resolve(options?.cwd ?? process.cwd(), PROFILE_FILE_NAME)
+}
+
+function normalizeProfileModel(
+  value: string | undefined | null,
+): string | undefined {
+  const trimmed = value?.trim()
+  if (!trimmed) {
+    return undefined
+  }
+
+  const primary = getPrimaryModel(trimmed)
+  return primary.length > 0 ? primary : undefined
 }
 
 export function isProviderProfile(value: unknown): value is ProviderProfile {
@@ -198,8 +221,12 @@ export function buildNvidiaNimProfileEnv(options: {
       sanitizeProviderConfigValue(processEnv.OPENAI_BASE_URL, secretSource) ||
       defaultBaseUrl,
     OPENAI_MODEL:
-      sanitizeProviderConfigValue(options.model, secretSource) ||
-      sanitizeProviderConfigValue(processEnv.OPENAI_MODEL, secretSource) ||
+      normalizeProfileModel(
+        sanitizeProviderConfigValue(options.model, secretSource),
+      ) ||
+      normalizeProfileModel(
+        sanitizeProviderConfigValue(processEnv.OPENAI_MODEL, secretSource),
+      ) ||
       'nvidia/llama-3.1-nemotron-70b-instruct',
     OPENAI_API_KEY: key,
     NVIDIA_NIM: '1',
@@ -228,8 +255,12 @@ export function buildMiniMaxProfileEnv(options: {
       sanitizeProviderConfigValue(processEnv.OPENAI_BASE_URL, secretSource) ||
       defaultBaseUrl,
     OPENAI_MODEL:
-      sanitizeProviderConfigValue(options.model, secretSource) ||
-      sanitizeProviderConfigValue(processEnv.OPENAI_MODEL, secretSource) ||
+      normalizeProfileModel(
+        sanitizeProviderConfigValue(options.model, secretSource),
+      ) ||
+      normalizeProfileModel(
+        sanitizeProviderConfigValue(processEnv.OPENAI_MODEL, secretSource),
+      ) ||
       defaultModel,
     OPENAI_API_KEY: key,
     MINIMAX_API_KEY: key,
@@ -261,8 +292,12 @@ export function buildGeminiProfileEnv(options: {
   const env: ProfileEnv = {
     GEMINI_AUTH_MODE: authMode,
     GEMINI_MODEL:
-      sanitizeProviderConfigValue(options.model, secretSource) ||
-      sanitizeProviderConfigValue(processEnv.GEMINI_MODEL, secretSource) ||
+      normalizeProfileModel(
+        sanitizeProviderConfigValue(options.model, secretSource),
+      ) ||
+      normalizeProfileModel(
+        sanitizeProviderConfigValue(processEnv.GEMINI_MODEL, secretSource),
+      ) ||
       DEFAULT_GEMINI_MODEL,
   }
 
@@ -295,9 +330,11 @@ export function buildOpenAIProfileEnv(options: {
 
   const defaultModel = getGoalDefaultOpenAIModel(options.goal)
   const secretSource: SecretValueSource = { OPENAI_API_KEY: key }
-  const shellOpenAIModel = sanitizeProviderConfigValue(
-    processEnv.OPENAI_MODEL,
-    secretSource,
+  const shellOpenAIModel = normalizeProfileModel(
+    sanitizeProviderConfigValue(
+      processEnv.OPENAI_MODEL,
+      secretSource,
+    ),
   )
   const shellOpenAIBaseUrl = sanitizeProviderConfigValue(
     processEnv.OPENAI_BASE_URL,
@@ -316,7 +353,9 @@ export function buildOpenAIProfileEnv(options: {
       (useShellOpenAIConfig ? shellOpenAIBaseUrl : undefined) ||
       DEFAULT_OPENAI_BASE_URL,
     OPENAI_MODEL:
-      sanitizeProviderConfigValue(options.model, secretSource) ||
+      normalizeProfileModel(
+        sanitizeProviderConfigValue(options.model, secretSource),
+      ) ||
       (useShellOpenAIConfig ? shellOpenAIModel : undefined) ||
       defaultModel,
     OPENAI_API_KEY: key,
@@ -373,10 +412,14 @@ export function buildMistralProfileEnv(options: {
   const env: ProfileEnv = {
     MISTRAL_API_KEY: key,
     MISTRAL_MODEL:
-      sanitizeProviderConfigValue(options.model, { MISTRAL_API_KEY: key }) ||
-      sanitizeProviderConfigValue(
-        processEnv.MISTRAL_MODEL,
-        { MISTRAL_API_KEY: key },
+      normalizeProfileModel(
+        sanitizeProviderConfigValue(options.model, { MISTRAL_API_KEY: key }),
+      ) ||
+      normalizeProfileModel(
+        sanitizeProviderConfigValue(
+          processEnv.MISTRAL_MODEL,
+          { MISTRAL_API_KEY: key },
+        ),
       ) ||
       DEFAULT_MISTRAL_MODEL,
   }
@@ -389,6 +432,42 @@ export function buildMistralProfileEnv(options: {
     )
   if (baseUrl) {
     env.MISTRAL_BASE_URL = baseUrl
+  }
+
+  return env
+}
+
+export function buildBankrProfileEnv(options: {
+  model?: string | null
+  baseUrl?: string | null
+  apiKey?: string | null
+  processEnv?: NodeJS.ProcessEnv
+}): ProfileEnv | null {
+  const processEnv = options.processEnv ?? process.env
+  const key = sanitizeApiKey(options.apiKey ?? processEnv.BNKR_API_KEY)
+  if (!key) {
+    return null
+  }
+
+  const env: ProfileEnv = {
+    BNKR_API_KEY: key,
+    BANKR_MODEL:
+      sanitizeProviderConfigValue(options.model, { BNKR_API_KEY: key }) ||
+      sanitizeProviderConfigValue(
+        processEnv.BANKR_MODEL,
+        { BNKR_API_KEY: key },
+      ) ||
+      'claude-opus-4.6',
+  }
+
+  const baseUrl =
+    sanitizeProviderConfigValue(options.baseUrl, { BNKR_API_KEY: key }) ||
+    sanitizeProviderConfigValue(
+      processEnv.BANKR_BASE_URL,
+      { BNKR_API_KEY: key },
+    )
+  if (baseUrl) {
+    env.BANKR_BASE_URL = baseUrl
   }
 
   return env
@@ -533,33 +612,41 @@ export async function buildLaunchEnv(options: {
     options.persisted?.profile === options.profile
       ? options.persisted.env ?? {}
       : {}
-  const persistedOpenAIModel = sanitizeProviderConfigValue(
-    persistedEnv.OPENAI_MODEL,
-    persistedEnv,
+  const persistedOpenAIModel = normalizeProfileModel(
+    sanitizeProviderConfigValue(
+      persistedEnv.OPENAI_MODEL,
+      persistedEnv,
+    ),
   )
   const persistedOpenAIBaseUrl = sanitizeProviderConfigValue(
     persistedEnv.OPENAI_BASE_URL,
     persistedEnv,
   )
-  const shellOpenAIModel = sanitizeProviderConfigValue(
-    processEnv.OPENAI_MODEL,
-    processEnv as SecretValueSource,
+  const shellOpenAIModel = normalizeProfileModel(
+    sanitizeProviderConfigValue(
+      processEnv.OPENAI_MODEL,
+      processEnv as SecretValueSource,
+    ),
   )
   const shellOpenAIBaseUrl = sanitizeProviderConfigValue(
     processEnv.OPENAI_BASE_URL,
     processEnv as SecretValueSource,
   )
-  const persistedGeminiModel = sanitizeProviderConfigValue(
-    persistedEnv.GEMINI_MODEL,
-    persistedEnv,
+  const persistedGeminiModel = normalizeProfileModel(
+    sanitizeProviderConfigValue(
+      persistedEnv.GEMINI_MODEL,
+      persistedEnv,
+    ),
   )
   const persistedGeminiBaseUrl = sanitizeProviderConfigValue(
     persistedEnv.GEMINI_BASE_URL,
     persistedEnv,
   )
-  const shellGeminiModel = sanitizeProviderConfigValue(
-    processEnv.GEMINI_MODEL,
-    processEnv as SecretValueSource,
+  const shellGeminiModel = normalizeProfileModel(
+    sanitizeProviderConfigValue(
+      processEnv.GEMINI_MODEL,
+      processEnv as SecretValueSource,
+    ),
   )
   const shellGeminiBaseUrl = sanitizeProviderConfigValue(
     processEnv.GEMINI_BASE_URL,
@@ -657,11 +744,15 @@ export async function buildLaunchEnv(options: {
     delete env.CLAUDE_CODE_USE_VERTEX
     delete env.CLAUDE_CODE_USE_FOUNDRY
 
-    const shellMistralModel = sanitizeProviderConfigValue(
-      processEnv.MISTRAL_MODEL,
+    const shellMistralModel = normalizeProfileModel(
+      sanitizeProviderConfigValue(
+        processEnv.MISTRAL_MODEL,
+      ),
     )
-    const persistedMistralModel = sanitizeProviderConfigValue(
-      persistedEnv.MISTRAL_MODEL,
+    const persistedMistralModel = normalizeProfileModel(
+      sanitizeProviderConfigValue(
+        persistedEnv.MISTRAL_MODEL,
+      ),
     )
     const shellMistralBaseUrl = sanitizeProviderConfigValue(
       processEnv.MISTRAL_BASE_URL,
@@ -823,7 +914,12 @@ export async function buildLaunchEnv(options: {
     (useShellOpenAIConfig ? shellOpenAIModel : undefined) ||
     (usePersistedOpenAIConfig ? persistedOpenAIModel : undefined) ||
     defaultOpenAIModel
-  env.OPENAI_API_KEY = processEnv.OPENAI_API_KEY || persistedEnv.OPENAI_API_KEY
+  const openAIKey = processEnv.OPENAI_API_KEY || persistedEnv.OPENAI_API_KEY
+  if (openAIKey) {
+    env.OPENAI_API_KEY = openAIKey
+  } else {
+    delete env.OPENAI_API_KEY
+  }
   delete env.CODEX_API_KEY
   delete env.CHATGPT_ACCOUNT_ID
   delete env.CODEX_ACCOUNT_ID
@@ -841,35 +937,31 @@ export async function buildStartupEnvFromProfile(options?: {
   const processEnv = options?.processEnv ?? process.env
   const persisted = options?.persisted ?? loadProfileFile()
 
-  // Saved /provider profiles should still win over provider-manager env that was
-  // auto-applied during startup. Only an explicit shell/flag provider selection
-  // should bypass the persisted startup profile.
-  //
   const profileManagedEnv = processEnv.CLAUDE_CODE_PROVIDER_PROFILE_ENV_APPLIED === '1'
 
-  // If the user explicitly selected a provider via env, allow it to bypass
-  // the persisted profile only when we can prove it was managed by the
-  // persisted profile env itself.
+  // The legacy single-profile file (~/.openclaude-profile.json) is a
+  // first-run / fallback mechanism. The newer plural provider-profile
+  // system (`/provider` presets + activeProviderProfileId in config) is
+  // applied earlier in the bootstrap via applyActiveProviderProfileFromConfig
+  // and signals completion with CLAUDE_CODE_PROVIDER_PROFILE_ENV_APPLIED=1.
   //
-  // Practically: on initial startup, provider routing env vars can already
-  // be present due to earlier auto-application steps. We should still apply
-  // the persisted profile rather than returning early.
+  // If the plural system has already set env, trust it — do NOT overlay the
+  // legacy file. addProviderProfile() does not sync the legacy file, so a
+  // stale legacy file (e.g. OpenAI defaults from an earlier manual setup)
+  // would otherwise overwrite the correct plural env and surface as the
+  // "banner shows gpt-4o / api.openai.com even though my saved profile is
+  // Moonshot" bug.
+  if (profileManagedEnv) {
+    return processEnv
+  }
+
+  if (isEnvTruthy(processEnv.CLAUDE_CODE_USE_GITHUB)) {
+    return processEnv
+  }
 
   if (!persisted) {
     return processEnv
   }
-
-  const launchProcessEnv = profileManagedEnv
-    ? (() => {
-        const cleanedEnv = { ...processEnv }
-        for (const key of PROFILE_ENV_KEYS) {
-          delete cleanedEnv[key]
-        }
-        delete cleanedEnv.CLAUDE_CODE_PROVIDER_PROFILE_ENV_APPLIED
-        delete cleanedEnv.CLAUDE_CODE_PROVIDER_PROFILE_ENV_APPLIED_ID
-        return cleanedEnv
-      })()
-    : processEnv
 
   return buildLaunchEnv({
     profile: persisted.profile,
@@ -877,7 +969,7 @@ export async function buildStartupEnvFromProfile(options?: {
     goal:
       options?.goal ??
       normalizeRecommendationGoal(processEnv.OPENCLAUDE_PROFILE_GOAL),
-    processEnv: launchProcessEnv,
+    processEnv,
     getOllamaChatBaseUrl:
       options?.getOllamaChatBaseUrl ?? getOllamaChatBaseUrl,
     resolveOllamaDefaultModel: options?.resolveOllamaDefaultModel,

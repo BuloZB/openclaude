@@ -1,3 +1,7 @@
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+
 import { afterEach, describe, expect, mock, test } from 'bun:test'
 
 import type { ProviderProfile } from './config.js'
@@ -7,6 +11,7 @@ async function importFreshProvidersModule() {
 }
 
 const originalEnv = { ...process.env }
+const originalCwd = process.cwd()
 
 const RESTORED_KEYS = [
   'CLAUDE_CODE_PROVIDER_PROFILE_ENV_APPLIED',
@@ -75,6 +80,7 @@ afterEach(() => {
 
   mock.restore()
   mockConfigState = createMockConfigState()
+  process.chdir(originalCwd)
 })
 
 async function importFreshProviderProfileModules() {
@@ -215,6 +221,23 @@ describe('applyProviderProfileToProcessEnv', () => {
     expect(process.env.OPENAI_BASE_URL).toBe('https://api.openai.com/v1')
   })
 
+  test('openai profile with semicolon-separated multi-model string sets only first model in OPENAI_MODEL', async () => {
+    const { applyProviderProfileToProcessEnv } =
+      await importFreshProviderProfileModules()
+
+    applyProviderProfileToProcessEnv(
+      buildProfile({
+        provider: 'openai',
+        baseUrl: 'https://api.openai.com/v1',
+        model: 'glm-4.7; glm-4.7-flash; glm-4.7-plus',
+      }),
+    )
+
+    expect(process.env.OPENAI_MODEL).toBe('glm-4.7')
+    expect(String(process.env.CLAUDE_CODE_USE_OPENAI)).toBe('1')
+    expect(process.env.OPENAI_BASE_URL).toBe('https://api.openai.com/v1')
+  })
+
   test('anthropic profile with multi-model string sets only first model in ANTHROPIC_MODEL', async () => {
     const { applyProviderProfileToProcessEnv } =
       await importFreshProviderProfileModules()
@@ -229,6 +252,34 @@ describe('applyProviderProfileToProcessEnv', () => {
 
     expect(process.env.ANTHROPIC_MODEL).toBe('claude-sonnet-4-6')
     expect(process.env.ANTHROPIC_BASE_URL).toBe('https://api.anthropic.com')
+  })
+
+  test('gemini profile with semicolon-separated multi-model string sets only first model in GEMINI_MODEL', async () => {
+    const { applyProviderProfileToProcessEnv } =
+      await importFreshProviderProfileModules()
+
+    applyProviderProfileToProcessEnv(
+      buildGeminiProfile({
+        model: 'gemini-3-flash-preview; gemini-3-pro-preview',
+      }),
+    )
+
+    expect(process.env.GEMINI_MODEL).toBe('gemini-3-flash-preview')
+    expect(process.env.CLAUDE_CODE_USE_GEMINI).toBe('1')
+  })
+
+  test('mistral profile with semicolon-separated multi-model string sets only first model in MISTRAL_MODEL', async () => {
+    const { applyProviderProfileToProcessEnv } =
+      await importFreshProviderProfileModules()
+
+    applyProviderProfileToProcessEnv(
+      buildMistralProfile({
+        model: 'devstral-latest; mistral-medium-latest',
+      }),
+    )
+
+    expect(process.env.MISTRAL_MODEL).toBe('devstral-latest')
+    expect(process.env.CLAUDE_CODE_USE_MISTRAL).toBe('1')
   })
 })
 
@@ -254,6 +305,83 @@ describe('applyActiveProviderProfileFromConfig', () => {
     expect(applied).toBeUndefined()
     expect(process.env.OPENAI_BASE_URL).toBe('http://localhost:11434/v1')
     expect(process.env.OPENAI_MODEL).toBe('qwen2.5:3b')
+  })
+
+  test('applies active profile when a bare CLAUDE_CODE_USE_OPENAI flag is stale (no BASE_URL/MODEL)', async () => {
+    // Regression: a leftover `CLAUDE_CODE_USE_OPENAI=1` in the shell with no
+    // paired OPENAI_BASE_URL / OPENAI_MODEL is not a real explicit selection
+    // — it's a stale export. The previous guard treated it as intent and
+    // skipped the saved profile, causing the startup banner to show hardcoded
+    // defaults (gpt-4o @ api.openai.com) instead of the user's active
+    // profile.
+    const { applyActiveProviderProfileFromConfig } =
+      await importFreshProviderProfileModules()
+    process.env.CLAUDE_CODE_USE_OPENAI = '1'
+    delete process.env.OPENAI_BASE_URL
+    delete process.env.OPENAI_API_BASE
+    delete process.env.OPENAI_MODEL
+
+    const applied = applyActiveProviderProfileFromConfig({
+      providerProfiles: [
+        buildProfile({
+          id: 'saved_moonshot',
+          baseUrl: 'https://api.moonshot.ai/v1',
+          model: 'kimi-k2.6',
+        }),
+      ],
+      activeProviderProfileId: 'saved_moonshot',
+    } as any)
+
+    expect(applied?.id).toBe('saved_moonshot')
+    expect(process.env.OPENAI_BASE_URL).toBe('https://api.moonshot.ai/v1')
+    expect(process.env.OPENAI_MODEL).toBe('kimi-k2.6')
+  })
+
+  test('still respects complete shell selection with USE flag + BASE_URL', async () => {
+    // Counter-example: when the user really did set both the flag AND a
+    // concrete BASE_URL, that IS explicit intent and wins over the saved
+    // profile. This preserves the original "explicit startup wins" semantic.
+    const { applyActiveProviderProfileFromConfig } =
+      await importFreshProviderProfileModules()
+    process.env.CLAUDE_CODE_USE_OPENAI = '1'
+    process.env.OPENAI_BASE_URL = 'http://192.168.1.1:8080/v1'
+    delete process.env.OPENAI_MODEL
+
+    const applied = applyActiveProviderProfileFromConfig({
+      providerProfiles: [
+        buildProfile({
+          id: 'saved_moonshot',
+          baseUrl: 'https://api.moonshot.ai/v1',
+          model: 'kimi-k2.6',
+        }),
+      ],
+      activeProviderProfileId: 'saved_moonshot',
+    } as any)
+
+    expect(applied).toBeUndefined()
+    expect(process.env.OPENAI_BASE_URL).toBe('http://192.168.1.1:8080/v1')
+  })
+
+  test('still respects complete shell selection with USE flag + MODEL', async () => {
+    const { applyActiveProviderProfileFromConfig } =
+      await importFreshProviderProfileModules()
+    process.env.CLAUDE_CODE_USE_OPENAI = '1'
+    process.env.OPENAI_MODEL = 'gpt-4o-mini'
+    delete process.env.OPENAI_BASE_URL
+
+    const applied = applyActiveProviderProfileFromConfig({
+      providerProfiles: [
+        buildProfile({
+          id: 'saved_moonshot',
+          baseUrl: 'https://api.moonshot.ai/v1',
+          model: 'kimi-k2.6',
+        }),
+      ],
+      activeProviderProfileId: 'saved_moonshot',
+    } as any)
+
+    expect(applied).toBeUndefined()
+    expect(process.env.OPENAI_MODEL).toBe('gpt-4o-mini')
   })
 
   test('does not override explicit startup selection when profile marker is stale', async () => {
@@ -450,6 +578,53 @@ describe('getProviderPresetDefaults', () => {
     expect(defaults.baseUrl).toBe('http://localhost:11434/v1')
     expect(defaults.model).toBe('llama3.1:8b')
   })
+
+  test('atomic-chat preset defaults to a local Atomic Chat endpoint', async () => {
+    const { getProviderPresetDefaults } = await importFreshProviderProfileModules()
+    delete process.env.OPENAI_MODEL
+
+    const defaults = getProviderPresetDefaults('atomic-chat')
+
+    expect(defaults.provider).toBe('openai')
+    expect(defaults.name).toBe('Atomic Chat')
+    expect(defaults.baseUrl).toBe('http://127.0.0.1:1337/v1')
+    expect(defaults.requiresApiKey).toBe(false)
+  })
+
+  test('kimi-code preset defaults to the Kimi Code coding endpoint', async () => {
+    const { getProviderPresetDefaults } = await importFreshProviderProfileModules()
+
+    const defaults = getProviderPresetDefaults('kimi-code')
+
+    expect(defaults.provider).toBe('openai')
+    expect(defaults.name).toBe('Moonshot AI - Kimi Code')
+    expect(defaults.baseUrl).toBe('https://api.kimi.com/coding/v1')
+    expect(defaults.model).toBe('kimi-for-coding')
+    expect(defaults.requiresApiKey).toBe(true)
+  })
+
+  test('moonshotai preset keeps the direct API under the renamed display label', async () => {
+    const { getProviderPresetDefaults } = await importFreshProviderProfileModules()
+
+    const defaults = getProviderPresetDefaults('moonshotai')
+
+    expect(defaults.name).toBe('Moonshot AI - API')
+    expect(defaults.baseUrl).toBe('https://api.moonshot.ai/v1')
+    expect(defaults.model).toBe('kimi-k2.5')
+  })
+  test('deepseek preset defaults to DeepSeek V4 flash and exposes flash/pro aliases', async () => {
+    const { getProviderPresetDefaults } = await importFreshProviderProfileModules()
+
+    const defaults = getProviderPresetDefaults('deepseek')
+
+    expect(defaults.provider).toBe('openai')
+    expect(defaults.name).toBe('DeepSeek')
+    expect(defaults.baseUrl).toBe('https://api.deepseek.com/v1')
+    expect(defaults.model).toBe(
+      'deepseek-v4-flash, deepseek-v4-pro, deepseek-chat, deepseek-reasoner',
+    )
+    expect(defaults.requiresApiKey).toBe(true)
+  })
 })
 
 describe('setActiveProviderProfile', () => {
@@ -478,6 +653,84 @@ describe('setActiveProviderProfile', () => {
     expect(process.env.CLAUDE_CODE_PROVIDER_PROFILE_ENV_APPLIED_ID).toBe(
       'openai_prof',
     )
+  })
+
+  test('persists no-key openai-compatible profiles for restart fallback', async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), 'openclaude-provider-'))
+    process.chdir(tempDir)
+    process.env.OPENAI_API_KEY = 'sk-shell-should-not-persist'
+
+    try {
+      const { setActiveProviderProfile } =
+        await importFreshProviderProfileModules()
+      const ollamaProfile = buildProfile({
+        id: 'ollama_prof',
+        name: 'Ollama',
+        provider: 'openai',
+        baseUrl: 'http://localhost:11434/v1',
+        model: 'llama3.1:8b, qwen2.5:7b',
+        apiKey: '',
+      })
+
+      saveMockGlobalConfig(current => ({
+        ...current,
+        providerProfiles: [ollamaProfile],
+      }))
+
+      const result = setActiveProviderProfile('ollama_prof')
+      const persisted = JSON.parse(
+        readFileSync(join(tempDir, '.openclaude-profile.json'), 'utf8'),
+      )
+
+      expect(result?.id).toBe('ollama_prof')
+      expect(persisted.profile).toBe('openai')
+      expect(persisted.env).toEqual({
+        OPENAI_BASE_URL: 'http://localhost:11434/v1',
+        OPENAI_MODEL: 'llama3.1:8b',
+      })
+    } finally {
+      process.chdir(originalCwd)
+      rmSync(tempDir, { recursive: true, force: true })
+    }
+  })
+
+  test('persists primary model for keyed openai-compatible multi-model profiles', async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), 'openclaude-provider-'))
+    process.chdir(tempDir)
+
+    try {
+      const { setActiveProviderProfile } =
+        await importFreshProviderProfileModules()
+      const deepSeekProfile = buildProfile({
+        id: 'deepseek_prof',
+        name: 'DeepSeek',
+        provider: 'openai',
+        baseUrl: 'https://api.deepseek.com/v1',
+        model: 'deepseek-v4-flash, deepseek-v4-pro, deepseek-chat',
+        apiKey: 'sk-deepseek-live',
+      })
+
+      saveMockGlobalConfig(current => ({
+        ...current,
+        providerProfiles: [deepSeekProfile],
+      }))
+
+      const result = setActiveProviderProfile('deepseek_prof')
+      const persisted = JSON.parse(
+        readFileSync(join(tempDir, '.openclaude-profile.json'), 'utf8'),
+      )
+
+      expect(result?.id).toBe('deepseek_prof')
+      expect(persisted.profile).toBe('openai')
+      expect(persisted.env).toEqual({
+        OPENAI_BASE_URL: 'https://api.deepseek.com/v1',
+        OPENAI_MODEL: 'deepseek-v4-flash',
+        OPENAI_API_KEY: 'sk-deepseek-live',
+      })
+    } finally {
+      process.chdir(originalCwd)
+      rmSync(tempDir, { recursive: true, force: true })
+    }
   })
 
   test('sets ANTHROPIC_MODEL env var when switching to an anthropic-type provider', async () => {
@@ -693,6 +946,24 @@ describe('getProfileModelOptions', () => {
       buildProfile({
         name: 'Test Provider',
         model: 'glm-4.7, glm-4.7-flash, glm-4.7-plus',
+      }),
+    )
+
+    expect(options).toEqual([
+      { value: 'glm-4.7', label: 'glm-4.7', description: 'Provider: Test Provider' },
+      { value: 'glm-4.7-flash', label: 'glm-4.7-flash', description: 'Provider: Test Provider' },
+      { value: 'glm-4.7-plus', label: 'glm-4.7-plus', description: 'Provider: Test Provider' },
+    ])
+  })
+
+  test('generates options for semicolon-separated multi-model profile', async () => {
+    const { getProfileModelOptions } =
+      await importFreshProviderProfileModules()
+
+    const options = getProfileModelOptions(
+      buildProfile({
+        name: 'Test Provider',
+        model: 'glm-4.7; glm-4.7-flash; glm-4.7-plus',
       }),
     )
 
