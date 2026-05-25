@@ -16,6 +16,7 @@ const originalEnv = {
     process.env.CLAUDE_CODE_OPENAI_MAX_OUTPUT_TOKENS,
   OPENAI_BASE_URL: process.env.OPENAI_BASE_URL,
   OPENAI_API_BASE: process.env.OPENAI_API_BASE,
+  OPENAI_API_KEY: process.env.OPENAI_API_KEY,
   OPENAI_MODEL: process.env.OPENAI_MODEL,
   MINIMAX_API_KEY: process.env.MINIMAX_API_KEY,
   XAI_API_KEY: process.env.XAI_API_KEY,
@@ -29,6 +30,7 @@ beforeEach(async () => {
   delete process.env.CLAUDE_CODE_OPENAI_MAX_OUTPUT_TOKENS
   delete process.env.OPENAI_BASE_URL
   delete process.env.OPENAI_API_BASE
+  delete process.env.OPENAI_API_KEY
   delete process.env.OPENAI_MODEL
   delete process.env.MINIMAX_API_KEY
   delete process.env.XAI_API_KEY
@@ -73,6 +75,11 @@ afterEach(() => {
       delete process.env.OPENAI_API_BASE
     } else {
       process.env.OPENAI_API_BASE = originalEnv.OPENAI_API_BASE
+    }
+    if (originalEnv.OPENAI_API_KEY === undefined) {
+      delete process.env.OPENAI_API_KEY
+    } else {
+      process.env.OPENAI_API_KEY = originalEnv.OPENAI_API_KEY
     }
     if (originalEnv.MINIMAX_API_KEY === undefined) {
       delete process.env.MINIMAX_API_KEY
@@ -304,6 +311,19 @@ test('unknown openai-compatible models use the 128k fallback window (not 8k, see
   delete process.env.OPENAI_MODEL
 
   expect(getContextWindowForModel('some-unknown-3p-model')).toBe(128_000)
+})
+
+test('prefixed OpenGateway Gemini Flash Lite uses integration metadata', () => {
+  process.env.CLAUDE_CODE_USE_OPENAI = '1'
+  delete process.env.CLAUDE_CODE_MAX_OUTPUT_TOKENS
+  delete process.env.OPENAI_MODEL
+
+  expect(getContextWindowForModel('google/gemini-3.1-flash-lite-preview')).toBe(1_048_576)
+  expect(getModelMaxOutputTokens('google/gemini-3.1-flash-lite-preview')).toEqual({
+    default: 65_536,
+    upperLimit: 65_536,
+  })
+  expect(getMaxOutputTokensForModel('google/gemini-3.1-flash-lite-preview')).toBe(65_536)
 })
 
 test('OpenAI-compatible custom model limits honor documented env overrides', () => {
