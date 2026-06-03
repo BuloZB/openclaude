@@ -129,7 +129,16 @@ async function importFreshProviderProfileModules() {
   const actualConfig = await import(`./config.js?ts=${Date.now()}-${Math.random()}`)
   mock.module('./config.js', () => ({
     ...actualConfig,
-    getGlobalConfig: () => mockConfigState,
+    // Spread the real config so the mock stays a COMPLETE GlobalConfig and only
+    // the provider-profile fields are overridden. bun's mock.restore() does NOT
+    // revert mock.module(), so this replacement leaks into later test files in
+    // the same process; returning a partial object (missing e.g.
+    // autoCompactEnabled) silently broke unrelated suites that read other config
+    // fields via getGlobalConfig().
+    getGlobalConfig: () => ({
+      ...actualConfig.getGlobalConfig(),
+      ...mockConfigState,
+    }),
     saveGlobalConfig: (
       updater: (current: MockConfigState) => MockConfigState,
     ) => {
@@ -470,7 +479,7 @@ describe('applyProviderProfileToProcessEnv', () => {
     applyProviderProfileToProcessEnv(
       buildProfile({
         provider: 'minimax',
-        baseUrl: 'https://api.minimax.io/v1',
+        baseUrl: 'https://api.minimax.io/anthropic',
         model: 'MiniMax-M2.7',
         apiKey: 'minimax-live-key',
         apiFormat: 'responses',
@@ -483,10 +492,11 @@ describe('applyProviderProfileToProcessEnv', () => {
       }),
     )
 
-    expect(process.env.OPENAI_BASE_URL).toBe('https://api.minimax.io/v1')
-    expect(process.env.OPENAI_MODEL).toBe('MiniMax-M2.7')
-    expect(process.env.OPENAI_API_KEY).toBe('minimax-live-key')
+    expect(process.env.ANTHROPIC_BASE_URL).toBe('https://api.minimax.io/anthropic')
+    expect(process.env.ANTHROPIC_MODEL).toBe('MiniMax-M2.7')
+    expect(process.env.ANTHROPIC_API_KEY).toBe('minimax-live-key')
     expect(process.env.MINIMAX_API_KEY).toBe('minimax-live-key')
+    expect(process.env.CLAUDE_CODE_USE_OPENAI).toBeUndefined()
     expect(process.env.OPENAI_API_FORMAT).toBeUndefined()
     expect(process.env.OPENAI_AUTH_HEADER).toBeUndefined()
     expect(process.env.OPENAI_AUTH_SCHEME).toBeUndefined()
@@ -830,6 +840,34 @@ describe('applyActiveProviderProfileFromConfig', () => {
     expect(process.env.OPENAI_MODEL).toBe('gpt-4o-mini')
   })
 
+  test('does not override explicit env-only MiniMax selection with saved profile', async () => {
+    const { applyActiveProviderProfileFromConfig } =
+      await importFreshProviderProfileModules()
+    process.env.MINIMAX_API_KEY = 'minimax-live-key'
+    process.env.ANTHROPIC_BASE_URL = 'https://api.minimax.io/anthropic'
+    process.env.ANTHROPIC_MODEL = 'MiniMax-M2.7'
+
+    const applied = applyActiveProviderProfileFromConfig({
+      providerProfiles: [
+        buildProfile({
+          id: 'saved_openai',
+          baseUrl: 'https://api.openai.com/v1',
+          model: 'gpt-4o',
+        }),
+      ],
+      activeProviderProfileId: 'saved_openai',
+    } as any)
+
+    expect(applied).toBeUndefined()
+    expect(process.env.MINIMAX_API_KEY).toBe('minimax-live-key')
+    expect(process.env.ANTHROPIC_BASE_URL).toBe(
+      'https://api.minimax.io/anthropic',
+    )
+    expect(process.env.ANTHROPIC_MODEL).toBe('MiniMax-M2.7')
+    expect(process.env.CLAUDE_CODE_USE_OPENAI).toBeUndefined()
+    expect(process.env.OPENAI_BASE_URL).toBeUndefined()
+  })
+
   test('does not override explicit startup selection when profile marker is stale', async () => {
     const { applyActiveProviderProfileFromConfig } =
       await importFreshProviderProfileModules()
@@ -987,9 +1025,13 @@ describe('applyActiveProviderProfileFromConfig', () => {
 })
 
 describe('persistActiveProviderProfileModel', () => {
-  test('updates active profile model and current env for profile-managed sessions', async () => {
+  // The runtime active-model selection is owned by mainLoopModelOverride
+  // (set by onChangeAppState before this helper is called). This helper
+  // intentionally no longer mutates the profile's model list — see the
+  // docstring in providerProfiles.ts. Coverage below locks the no-op
+  // contract for both single- and multi-model profiles.
+  test('returns the active profile unchanged for a single-model profile', async () => {
     const {
-      applyProviderProfileToProcessEnv,
       getProviderProfiles,
       persistActiveProviderProfileModel,
     } = await importFreshProviderProfileModules()
@@ -1004,13 +1046,49 @@ describe('persistActiveProviderProfileModel', () => {
       providerProfiles: [activeProfile],
       activeProviderProfileId: activeProfile.id,
     }))
-    applyProviderProfileToProcessEnv(activeProfile)
 
     const updated = persistActiveProviderProfileModel('minimax-m2.5:cloud')
 
     expect(updated?.id).toBe(activeProfile.id)
-    expect(updated?.model).toBe('minimax-m2.5:cloud')
-    expect(process.env.OPENAI_MODEL).toBe('minimax-m2.5:cloud')
+    expect(updated?.model).toBe('kimi-k2.5:cloud')
+    const saved = getProviderProfiles().find(
+      (profile: ProviderProfile) => profile.id === activeProfile.id,
+    )
+    expect(saved?.model).toBe('kimi-k2.5:cloud')
+  })
+
+  test('does not mutate multi-model mistral profile when chosen model is out of list', async () => {
+    // Regression for #1360: the picker must never silently rewrite a
+    // provider's configured model list. The active model is a session-level
+    // choice handled by mainLoopModelOverride; the profile's model list
+    // only changes via an explicit provider edit. An earlier
+    // implementation prepended the chosen model to the list, which
+    // contradicted the documented contract and grew the list unboundedly
+    // on rotation.
+    const {
+      applyProviderProfileToProcessEnv,
+      getProviderProfiles,
+      persistActiveProviderProfileModel,
+    } = await importFreshProviderProfileModules()
+    const activeProfile = buildMistralProfile({
+      id: 'saved_mistral',
+      baseUrl: 'https://api.mistral.ai/v1',
+      model: 'devstral-latest; mistral-small-latest',
+    })
+
+    saveMockGlobalConfig(current => ({
+      ...current,
+      providerProfiles: [activeProfile],
+      activeProviderProfileId: activeProfile.id,
+    }))
+    applyProviderProfileToProcessEnv(activeProfile)
+
+    const updated = persistActiveProviderProfileModel('mistral-large-latest')
+
+    expect(updated?.id).toBe(activeProfile.id)
+    // The configured list is preserved verbatim regardless of the chosen
+    // model being in or out of the list.
+    expect(updated?.model).toBe('devstral-latest; mistral-small-latest')
     expect(process.env.CLAUDE_CODE_PROVIDER_PROFILE_ENV_APPLIED_ID).toBe(
       activeProfile.id,
     )
@@ -1018,17 +1096,20 @@ describe('persistActiveProviderProfileModel', () => {
     const saved = getProviderProfiles().find(
       (profile: ProviderProfile) => profile.id === activeProfile.id,
     )
-    expect(saved?.model).toBe('minimax-m2.5:cloud')
+    expect(saved?.model).toBe('devstral-latest; mistral-small-latest')
   })
 
-  test('does not mutate process env when session is not profile-managed', async () => {
+  test('preserves comma-separated multi-model list when chosen model is already a member', async () => {
+    // Switching between models already in the list is a session-level
+    // choice. The list itself must be preserved exactly as configured.
     const {
       getProviderProfiles,
       persistActiveProviderProfileModel,
     } = await importFreshProviderProfileModules()
-    const activeProfile = buildProfile({
-      id: 'saved_openai',
-      model: 'kimi-k2.5:cloud',
+    const activeProfile = buildMistralProfile({
+      id: 'saved_mistral',
+      baseUrl: 'https://api.mistral.ai/v1',
+      model: 'devstral-latest, mistral-small-latest, mistral-large-latest',
     })
 
     saveMockGlobalConfig(current => ({
@@ -1037,18 +1118,17 @@ describe('persistActiveProviderProfileModel', () => {
       activeProviderProfileId: activeProfile.id,
     }))
 
-    process.env.CLAUDE_CODE_USE_OPENAI = '1'
-    process.env.OPENAI_MODEL = 'cli-model'
-    delete process.env.CLAUDE_CODE_PROVIDER_PROFILE_ENV_APPLIED
-    delete process.env.CLAUDE_CODE_PROVIDER_PROFILE_ENV_APPLIED_ID
+    const updated = persistActiveProviderProfileModel('mistral-small-latest')
 
-    persistActiveProviderProfileModel('minimax-m2.5:cloud')
-
-    expect(process.env.OPENAI_MODEL).toBe('cli-model')
+    expect(updated?.model).toBe(
+      'devstral-latest, mistral-small-latest, mistral-large-latest',
+    )
     const saved = getProviderProfiles().find(
       (profile: ProviderProfile) => profile.id === activeProfile.id,
     )
-    expect(saved?.model).toBe('minimax-m2.5:cloud')
+    expect(saved?.model).toBe(
+      'devstral-latest, mistral-small-latest, mistral-large-latest',
+    )
   })
 })
 
@@ -1122,15 +1202,15 @@ describe('getProviderPresetDefaults', () => {
     expect(defaults.requiresApiKey).toBe(true)
   })
 
-  test('minimax preset defaults to MiniMax M2.7', async () => {
+  test('minimax preset defaults to MiniMax M3', async () => {
     const { getProviderPresetDefaults } = await importFreshProviderProfileModules()
 
     const defaults = getProviderPresetDefaults('minimax')
 
     expect(defaults.provider).toBe('minimax')
     expect(defaults.name).toBe('MiniMax')
-    expect(defaults.baseUrl).toBe('https://api.minimax.io/v1')
-    expect(defaults.model).toBe('MiniMax-M2.7')
+    expect(defaults.baseUrl).toBe('https://api.minimax.io/anthropic')
+    expect(defaults.model).toBe('MiniMax-M3')
     expect(defaults.requiresApiKey).toBe(true)
   })
 
@@ -2098,4 +2178,11 @@ describe('setActiveProviderProfile model cache', () => {
       },
     ])
   })
+})
+
+test('DEFAULT_MISTRAL_MODEL matches the mistral gateway defaultModel', async () => {
+  const { DEFAULT_MISTRAL_MODEL } = await import('./providerProfile.js')
+  const { default: mistralGateway } = await import('../integrations/gateways/mistral.js')
+  expect(mistralGateway.defaultModel).toBeDefined()
+  expect(DEFAULT_MISTRAL_MODEL).toBe(mistralGateway.defaultModel!)
 })

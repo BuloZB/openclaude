@@ -42,6 +42,7 @@ import {
   type ResolvedProfileRoute,
   type ProviderPreset,
 } from '../integrations/index.js'
+import { resolveEnvOnlyProviderRouteId } from '../integrations/routeMetadata.js'
 import { logForDebugging } from './debug.js'
 import {
   sanitizeProfileCustomHeaders,
@@ -96,6 +97,9 @@ function resolveProfileCompatibility(provider: string): {
     return { route, compatibilityMode: 'vertex' }
   }
   if (route.vendorId === 'anthropic') {
+    return { route, compatibilityMode: 'anthropic' }
+  }
+  if (route.vendorId === 'minimax') {
     return { route, compatibilityMode: 'anthropic' }
   }
   if (route.vendorId === 'gemini') {
@@ -345,6 +349,7 @@ function hasProviderSelectionFlags(
 function hasCompleteProviderSelection(
   processEnv: NodeJS.ProcessEnv = process.env,
 ): boolean {
+  if (resolveEnvOnlyProviderRouteId(processEnv) !== null) return true
   if (!hasProviderSelectionFlags(processEnv)) return false
   if (processEnv.CLAUDE_CODE_USE_OPENAI !== undefined) {
     return (
@@ -581,10 +586,20 @@ export function applyProviderProfileToProcessEnv(profile: ProviderProfile): void
   }
 
   if (compatibilityMode === 'anthropic') {
-    profileEnv = {
-      ANTHROPIC_BASE_URL: profile.baseUrl,
-      ANTHROPIC_MODEL: primaryModel,
-      ...(profile.apiKey ? { ANTHROPIC_API_KEY: profile.apiKey } : {}),
+    if (route.vendorId === 'minimax') {
+      profileEnv =
+        buildMiniMaxProfileEnv({
+          model: primaryModel,
+          baseUrl: profile.baseUrl,
+          apiKey: profile.apiKey,
+          processEnv: process.env,
+        }) ?? {}
+    } else {
+      profileEnv = {
+        ANTHROPIC_BASE_URL: profile.baseUrl,
+        ANTHROPIC_MODEL: primaryModel,
+        ...(profile.apiKey ? { ANTHROPIC_API_KEY: profile.apiKey } : {}),
+      }
     }
   } else if (compatibilityMode === 'mistral') {
     profileEnv = {
@@ -843,56 +858,20 @@ export function persistActiveProviderProfileModel(
     return null
   }
 
-  // If the model is already part of the profile's model list, don't
-  // overwrite the field. This preserves comma-separated model lists like
-  // "glm-4.5, glm-4.7". Switching between models in the list is a
-  // session-level choice handled by mainLoopModelOverride, not a profile
-  // edit — the profile's model list should only change via explicit edit.
-  const existingModels = parseModelList(activeProfile.model)
-  if (existingModels.includes(nextModel)) {
-    return activeProfile
-  }
-
-  saveGlobalConfig(current => {
-    const currentProfiles = getProviderProfiles(current)
-    const profileIndex = currentProfiles.findIndex(
-      profile => profile.id === activeProfile.id,
-    )
-
-    if (profileIndex < 0) {
-      return current
-    }
-
-    const currentProfile = currentProfiles[profileIndex]
-    if (currentProfile.model === nextModel) {
-      return current
-    }
-
-    const nextProfiles = [...currentProfiles]
-    nextProfiles[profileIndex] = {
-      ...currentProfile,
-      model: nextModel,
-    }
-
-    return {
-      ...current,
-      providerProfiles: nextProfiles,
-    }
-  })
-
-  const resolvedProfile = getActiveProviderProfile()
-  if (!resolvedProfile || resolvedProfile.id !== activeProfile.id) {
-    return null
-  }
-
-  if (
-    process.env[PROFILE_ENV_APPLIED_FLAG] === '1' &&
-    trimOrUndefined(process.env[PROFILE_ENV_APPLIED_ID]) === resolvedProfile.id
-  ) {
-    applyProviderProfileToProcessEnv(resolvedProfile)
-  }
-
-  return resolvedProfile
+  // Runtime model selection is a session-level choice handled by
+  // mainLoopModelOverride (see src/hooks/useMainLoopModel.ts), not a
+  // profile edit. Whether the chosen model is already part of the
+  // profile's list or not, do NOT mutate profile.model here:
+  //   - if it IS in the list, the list is already correct (no-op)
+  //   - if it ISN'T, the user picked an out-of-list model for the
+  //     session and the profile's list should only change via an
+  //     explicit provider edit, not by side-effect of /model.
+  // An earlier implementation prepended out-of-list models to the
+  // profile, which (a) contradicted this contract, (b) caused
+  // unbounded list growth on rotation, and (c) used a separator
+  // inferred from a single-character substring of the model field
+  // that broke on mixed-separator inputs.
+  return activeProfile
 }
 
 /**
@@ -990,6 +969,18 @@ function buildStartupProfileFromActiveProfile(
 
   switch (compatibilityMode) {
     case 'anthropic':
+      if (route.vendorId === 'minimax') {
+        const env =
+          buildMiniMaxProfileEnv({
+            model: getPrimaryModel(activeProfile.model),
+            baseUrl: activeProfile.baseUrl,
+            apiKey: activeProfile.apiKey,
+            processEnv: process.env,
+          }) ?? null
+        return env
+          ? { profile: 'minimax', env: applySupportedProfileCustomHeaders(activeProfile, env) }
+          : null
+      }
       return {
         profile: 'anthropic',
         env: applySupportedProfileCustomHeaders(activeProfile, {

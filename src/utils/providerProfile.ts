@@ -3,6 +3,7 @@ import { dirname, join, resolve } from 'node:path'
 import {
   DEFAULT_CODEX_BASE_URL,
   DEFAULT_OPENAI_BASE_URL,
+  DEFAULT_OPENCODE_BASE_URL,
   isCodexBaseUrl,
   parseOpenAICompatibleApiFormat,
   resolveCodexApiCredentials,
@@ -44,7 +45,9 @@ export const DEFAULT_GEMINI_BASE_URL =
   'https://generativelanguage.googleapis.com/v1beta/openai'
 export const DEFAULT_GEMINI_MODEL = 'gemini-3-flash-preview'
 export const DEFAULT_MISTRAL_BASE_URL = 'https://api.mistral.ai/v1'
-export const DEFAULT_MISTRAL_MODEL = 'devstral-latest'
+export const DEFAULT_MISTRAL_MODEL = 'mistral-vibe-cli-latest'
+export const DEFAULT_STARTUP_PROVIDER_ENV_VAR =
+  'CLAUDE_CODE_DEFAULT_STARTUP_PROVIDER'
 
 const PROFILE_ENV_KEYS = [
   'CLAUDE_CODE_USE_OPENAI',
@@ -94,6 +97,8 @@ const PROFILE_ENV_KEYS = [
   'XAI_CREDENTIAL_SOURCE',
   'VENICE_API_KEY',
   'MIMO_API_KEY',
+  'OPENCODE_API_KEY',
+  DEFAULT_STARTUP_PROVIDER_ENV_VAR,
 ] as const
 
 export type CompatibilityProfileMode =
@@ -118,6 +123,7 @@ const SECRET_ENV_KEYS = [
   'XAI_API_KEY',
   'VENICE_API_KEY',
   'MIMO_API_KEY',
+  'OPENCODE_API_KEY',
 ] as const
 
 export type ProviderProfile =
@@ -134,6 +140,7 @@ export type ProviderProfile =
   | 'bedrock'
   | 'vertex'
   | 'xai'
+  | 'opencode'
 
 export type ProfileEnv = {
   ANTHROPIC_BASE_URL?: string
@@ -175,6 +182,7 @@ export type ProfileEnv = {
   XAI_CREDENTIAL_SOURCE?: 'oauth'
   VENICE_API_KEY?: string
   MIMO_API_KEY?: string
+  OPENCODE_API_KEY?: string
 }
 
 export type ProfileFile = {
@@ -186,6 +194,7 @@ export type ProfileFile = {
 type SecretValueSource = Partial<
   Record<
     | 'OPENAI_API_KEY'
+    | 'ANTHROPIC_API_KEY'
     | 'OPENAI_AUTH_HEADER_VALUE'
     | 'CODEX_API_KEY'
     | 'GEMINI_API_KEY'
@@ -311,7 +320,8 @@ export function isProviderProfile(value: unknown): value is ProviderProfile {
     value === 'github' ||
     value === 'bedrock' ||
     value === 'vertex' ||
-    value === 'xai'
+    value === 'xai' ||
+    value === 'opencode'
   )
 }
 
@@ -448,22 +458,29 @@ export function buildMiniMaxProfileEnv(options: {
   if (!defaultBaseUrl || !defaultModel) {
     throw new Error('MiniMax route defaults are missing from integration metadata.')
   }
-  const secretSource: SecretValueSource = { OPENAI_API_KEY: key }
+  const secretSource: SecretValueSource = {
+    ANTHROPIC_API_KEY: key,
+    MINIMAX_API_KEY: key,
+    OPENAI_API_KEY: key,
+  }
 
   return {
-    OPENAI_BASE_URL:
+    ANTHROPIC_BASE_URL:
       sanitizeProviderConfigValue(options.baseUrl, secretSource) ||
-      sanitizeProviderConfigValue(processEnv.OPENAI_BASE_URL, secretSource) ||
+      sanitizeProviderConfigValue(processEnv.ANTHROPIC_BASE_URL, secretSource) ||
       defaultBaseUrl,
-    OPENAI_MODEL:
+    ANTHROPIC_MODEL:
       normalizeProfileModel(
         sanitizeProviderConfigValue(options.model, secretSource),
       ) ||
       normalizeProfileModel(
-        sanitizeProviderConfigValue(processEnv.OPENAI_MODEL, secretSource),
+        sanitizeProviderConfigValue(
+          processEnv.ANTHROPIC_MODEL ?? processEnv.OPENAI_MODEL,
+          secretSource,
+        ),
       ) ||
       defaultModel,
-    OPENAI_API_KEY: key,
+    ANTHROPIC_API_KEY: key,
     MINIMAX_API_KEY: key,
     MINIMAX_BASE_URL: defaultBaseUrl,
     MINIMAX_MODEL: defaultModel,
@@ -861,6 +878,10 @@ export function buildCompatibilityProcessEnv(options: {
 
   applyProfileEnvToProcessEnv(env, nextEnv)
   return env
+}
+
+export function isDefaultStartupProviderEnv(env: NodeJS.ProcessEnv): boolean {
+  return env[DEFAULT_STARTUP_PROVIDER_ENV_VAR] === 'gitlawb-opengateway'
 }
 
 export function buildCodexOAuthProfileEnv(
@@ -1398,6 +1419,28 @@ export async function buildLaunchEnv(options: {
     return result
   }
 
+  if (options.profile === 'opencode') {
+    const opencodeKey =
+      sanitizeApiKey(processEnv.OPENCODE_API_KEY) ||
+      sanitizeApiKey(persistedEnv.OPENCODE_API_KEY)
+    const opencodeBaseUrl =
+      sanitizeProviderConfigValue(processEnv.OPENAI_BASE_URL) ||
+      sanitizeProviderConfigValue(persistedEnv.OPENAI_BASE_URL) ||
+      DEFAULT_OPENCODE_BASE_URL
+    const opencodeModel =
+      shellOpenAIModel || persistedOpenAIModel || 'gpt-5.4'
+
+    return buildCompatibilityProcessEnv({
+      processEnv,
+      compatibilityMode: 'openai',
+      profileEnv: {
+        OPENAI_BASE_URL: opencodeBaseUrl,
+        OPENAI_MODEL: opencodeModel,
+        ...(opencodeKey ? { OPENAI_API_KEY: opencodeKey } : {}),
+      },
+    })
+  }
+
   if (options.profile === 'ollama') {
     const getOllamaBaseUrl =
       options.getOllamaChatBaseUrl ?? (() => 'http://localhost:11434/v1')
@@ -1556,7 +1599,8 @@ export async function buildStartupEnvFromProfile(options?: {
   readGeminiAccessToken?: () => string | undefined
 }): Promise<NodeJS.ProcessEnv> {
   const processEnv = options?.processEnv ?? process.env
-  const persisted = options?.persisted ?? loadProfileFile()
+  const persisted =
+    options && 'persisted' in options ? options.persisted : loadProfileFile()
 
   const profileManagedEnv = processEnv.CLAUDE_CODE_PROVIDER_PROFILE_ENV_APPLIED === '1'
   const hasConfiguredProviderProfile =
@@ -1595,26 +1639,20 @@ export async function buildStartupEnvFromProfile(options?: {
   }
 
   if (!persisted) {
-    // No saved profile — default to Codex OAuth / GPT 5.5.
-    // If Codex credentials are available (OAuth or existing), use Codex.
-    // Otherwise inject the Codex env defaults so the provider picker
-    // shows GPT 5.5 as the default model when the user lands on it.
-    const codexEnv = buildCodexProfileEnv({})
-    if (codexEnv) {
-      return buildCompatibilityProcessEnv({
-        processEnv,
-        compatibilityMode: 'openai',
-        profileEnv: codexEnv,
-      })
-    }
-    return buildCompatibilityProcessEnv({
+    // No saved profile — default to Gitlawb Opengateway.
+    const env = buildCompatibilityProcessEnv({
       processEnv,
       compatibilityMode: 'openai',
       profileEnv: {
-        OPENAI_BASE_URL: DEFAULT_CODEX_BASE_URL,
-        OPENAI_MODEL: 'codexplan',
+        OPENAI_BASE_URL:
+          getRouteDefaultBaseUrl('gitlawb-opengateway') ??
+          'https://opengateway.gitlawb.com/v1',
+        OPENAI_MODEL:
+          getRouteDefaultModel('gitlawb-opengateway') ?? 'mimo-v2.5-pro',
       },
     })
+    env[DEFAULT_STARTUP_PROVIDER_ENV_VAR] = 'gitlawb-opengateway'
+    return env
   }
 
   return buildLaunchEnv({
