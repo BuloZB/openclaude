@@ -19,9 +19,15 @@ export interface ConversationCacheConfig {
 }
 
 export class ConversationCache {
-  private cache = new Map<string, CacheEntry<Message[]>>()
+  private cache = new Map<string, CacheEntry<CacheMessage[]>>()
   private accessOrder = new Map<string, number>()
   private evictions = 0
+  // Monotonic logical clock for recency. Must never decrease, so it can't be
+  // derived from `accessOrder.size` — that plateaus at ~maxSize once the cache
+  // is full (and drops on delete), which makes a freshly-set entry tie or even
+  // rank older than entries a prior get already bumped, so evictLRU discards the
+  // most-recently-touched key instead of the least.
+  private accessClock = 0
 
   private readonly maxSize: number
   private readonly ttlMs: number
@@ -39,7 +45,7 @@ export class ConversationCache {
     return this.evictions
   }
 
-  set(key: string, messages: Message[]): void {
+  set(key: string, messages: CacheMessage[]): void {
     if (this.cache.size >= this.maxSize && !this.cache.has(key)) {
       this.evictLRU()
     }
@@ -49,10 +55,10 @@ export class ConversationCache {
       timestamp: Date.now(),
       hits: 0,
     })
-    this.accessOrder.set(key, this.accessOrder.size)
+    this.accessOrder.set(key, ++this.accessClock)
   }
 
-  get(key: string): Message[] | undefined {
+  get(key: string): CacheMessage[] | undefined {
     const entry = this.cache.get(key)
     if (!entry) return undefined
 
@@ -62,7 +68,7 @@ export class ConversationCache {
     }
 
     entry.hits++
-    this.accessOrder.set(key, this.accessOrder.size)
+    this.accessOrder.set(key, ++this.accessClock)
     return entry.value
   }
 
@@ -137,39 +143,8 @@ export class ConversationCache {
   }
 }
 
-export interface Message {
-  role: 'user' | 'assistant' | 'system'
-  content: string
-  /** True if original message content was a structured array, not a string */
-  contentIsArray?: boolean
-  tool_calls?: unknown[]
-  tool_use_id?: string
-  timestamp?: number
-  id?: string
-  type?: string
-  model?: string
-  created_at?: number
-  stop_reason?: string
-  usage?: unknown
-  is_development?: boolean
-  index?: number
-  uuid?: string
-  session_id?: string
-  parent_tool_use_id?: string | null
-  tool_use_result?: unknown
-  message?: unknown
-  subtype?: string
-  result?: string
-  event?: unknown
-  error?: string
-  errors?: string[]
-  status?: string | null
-  compact_metadata?: unknown
-  tool_name?: string
-  elapsed_time_seconds?: number
-}
-
-export type CacheMessage = Message
+export type CacheMessage = Record<string, unknown>
+export type Message = CacheMessage
 
 export interface SessionCacheMetadata {
   hasMore: boolean

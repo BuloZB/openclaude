@@ -283,7 +283,7 @@ function createSpeculationFeedbackMessage(
   const toolUses = countToolsInMessages(messages)
   const tokens = boundary?.type === 'complete' ? boundary.outputTokens : null
 
-  const parts = []
+  const parts: string[] = []
   if (toolUses > 0) {
     parts.push(`Speculated ${toolUses} tool ${toolUses === 1 ? 'use' : 'uses'}`)
   } else {
@@ -465,14 +465,11 @@ export async function startSpeculation(
         // Check permission mode BEFORE allowing file edits
         if (isWriteTool) {
           const appState = context.toolUseContext.getAppState()
-          const { mode, isBypassPermissionsModeAvailable } =
-            appState.toolPermissionContext
-
+          const { mode } = appState.toolPermissionContext
           const canAutoAcceptEdits =
             mode === 'acceptEdits' ||
             mode === 'bypassPermissions' ||
-            mode === 'fullAccess' ||
-            (mode === 'plan' && isBypassPermissionsModeAvailable)
+            mode === 'fullAccess'
 
           if (!canAutoAcceptEdits) {
             logForDebugging(`[Speculation] Stopping at file edit: ${tool.name}`)

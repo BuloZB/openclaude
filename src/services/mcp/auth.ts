@@ -44,6 +44,7 @@ import { clearKeychainCache } from '../../utils/secureStorage/macOsKeychainHelpe
 import type { SecureStorageData } from '../../utils/secureStorage/index.js'
 import { sleep } from '../../utils/sleep.js'
 import { jsonParse, jsonStringify } from '../../utils/slowOperations.js'
+import { jsonRedactor } from '../../utils/redaction.js'
 import { logEvent } from '../analytics/index.js'
 import type { AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS } from '../analytics/metadata.js'
 import { buildRedirectUri, findAvailablePort } from './oauthPort.js'
@@ -267,7 +268,7 @@ export async function normalizeOAuthErrorBody(
 function createAuthFetch(): FetchLike {
   return async (url: string | URL, init?: RequestInit) => {
     const isPost = init?.method?.toUpperCase() === 'POST'
-    const { signal, cleanup } = createCombinedAbortSignal(init?.signal, {
+    const { signal, cleanup } = createCombinedAbortSignal(init?.signal ?? undefined, {
       timeoutMs: AUTH_REQUEST_TIMEOUT_MS,
     })
     try {
@@ -741,10 +742,8 @@ async function performMCPXaaAuth(
     const haveKeys = Object.keys(
       getSecureStorage().read()?.mcpOAuthClientConfig ?? {},
     )
-    const headersForLogging = Object.fromEntries(
-      Object.entries(serverConfig.headers ?? {}).map(([k, v]) =>
-        k.toLowerCase() === 'authorization' ? [k, '[REDACTED]'] : [k, v],
-      ),
+    const headersForLogging = JSON.parse(
+      JSON.stringify(serverConfig.headers ?? {}, jsonRedactor),
     )
     logMCPDebug(
       serverName,
@@ -2091,10 +2090,6 @@ export class ClaudeAuthProvider implements OAuthClientProvider {
       return {
         authorizationServerUrl: cached.authorizationServerUrl,
         resourceMetadataUrl: cached.resourceMetadataUrl,
-        resourceMetadata:
-          cached.resourceMetadata as OAuthDiscoveryState['resourceMetadata'],
-        authorizationServerMetadata:
-          cached.authorizationServerMetadata as OAuthDiscoveryState['authorizationServerMetadata'],
       }
     }
 

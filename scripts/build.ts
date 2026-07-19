@@ -8,12 +8,75 @@
  * - src/ path aliases
  */
 
-import { readFileSync } from 'fs'
+import { existsSync, readFileSync } from 'fs'
+import { createRequire } from 'module'
+import { dirname, join } from 'path'
 import { noTelemetryPlugin } from './no-telemetry-plugin'
 import { CLI_EXTERNALS, SDK_EXTERNALS } from './externals.js'
+import { canonicalStub, collectBundleStubs } from './stubMarkerGuard.js'
 
+const nodeRequire = createRequire(import.meta.url)
 const pkg = JSON.parse(readFileSync('./package.json', 'utf-8'))
 const version = pkg.version
+const reactPackageDir = dirname(nodeRequire.resolve('react/package.json'))
+const reactReconcilerPackageDir = dirname(
+  nodeRequire.resolve('react-reconciler/package.json'),
+)
+const schedulerPackageDir = dirname(nodeRequire.resolve('scheduler/package.json'))
+const productionReactModules = new Map<string, string>([
+  ['react', join(reactPackageDir, 'cjs/react.production.js')],
+  [
+    'react/jsx-runtime',
+    join(reactPackageDir, 'cjs/react-jsx-runtime.production.js'),
+  ],
+  // NOT react-jsx-dev-runtime.production.js: that file exports
+  // `jsxDEV: undefined` on purpose (production code is expected to use the
+  // non-dev transform), but Bun transpiles our JSX to jsxDEV() calls, so the
+  // real production file would leave every component invoking undefined()
+  // and the UI would never render. The shim dispatches to production
+  // jsx/jsxs; its own `react/jsx-runtime` import is remapped by this plugin.
+  [
+    'react/jsx-dev-runtime',
+    join(import.meta.dir, 'reactJsxDevRuntimeProductionShim.js'),
+  ],
+  [
+    'react-reconciler',
+    join(reactReconcilerPackageDir, 'cjs/react-reconciler.production.js'),
+  ],
+  [
+    'react-reconciler/constants.js',
+    join(
+      reactReconcilerPackageDir,
+      'cjs/react-reconciler-constants.production.js',
+    ),
+  ],
+  ['scheduler', join(schedulerPackageDir, 'cjs/scheduler.production.js')],
+])
+
+for (const [specifier, resolvedPath] of productionReactModules) {
+  if (!existsSync(resolvedPath)) {
+    throw new Error(
+      `productionReactPlugin: expected production file for "${specifier}" not found at ${resolvedPath}. ` +
+        'The installed React package layout may have changed.',
+    )
+  }
+}
+
+const productionReactPlugin = {
+  name: 'production-react-bundle',
+  setup(build) {
+    build.onResolve(
+      {
+        filter:
+          /^(react|react\/jsx-runtime|react\/jsx-dev-runtime|react-reconciler|react-reconciler\/constants\.js|scheduler)$/,
+      },
+      args => {
+        const path = productionReactModules.get(args.path)
+        return path ? { path } : null
+      },
+    )
+  },
+}
 
 // Feature flags for the open build.
 // Most Anthropic-internal features stay off; open-build features can be
@@ -27,14 +90,18 @@ const featureFlags: Record<string, boolean> = {
   DAEMON: false,                  // Background daemon process (stubbed in open build)
   AGENT_TRIGGERS: false,          // Scheduled remote agent triggers
   ABLATION_BASELINE: false,       // A/B testing harness for eval experiments
-  CONTEXT_COLLAPSE: false,        // Context collapsing optimization (stubbed)
+  CONTEXT_COLLAPSE: true,        // Context collapsing optimization
   COMMIT_ATTRIBUTION: false,      // Co-Authored-By metadata in git commits
+  HISTORY_SNIP: true,             // Model-callable snip tool for context management
   UDS_INBOX: false,               // Unix Domain Socket inter-session messaging
-  BG_SESSIONS: false,             // Background sessions via tmux (stubbed)
+  BG_SESSIONS: true,              // Local detached background sessions
   WEB_BROWSER_TOOL: false,        // Built-in browser automation (source not mirrored)
   CHICAGO_MCP: false,             // Computer-use MCP (native Swift modules stubbed)
   COWORKER_TYPE_TELEMETRY: false, // Telemetry for agent/coworker type classification
   MCP_SKILLS: true,               // Dynamic MCP skill discovery via skill:// resources
+
+  // ── Disabled by default, opt-in via runtime env var ─────────────────
+  REPO_MAP: false,                // Auto-injected codebase intelligence repo-map; users opt in with REPO_MAP=1 (the runtime gate in src/context.ts honors the env var even when this flag is false)
 
   // ── Enabled: upstream defaults ──────────────────────────────────────
   COORDINATOR_MODE: true,             // Multi-agent coordinator with worker delegation
@@ -56,6 +123,7 @@ const featureFlags: Record<string, boolean> = {
   SHOT_STATS: true,                   // Shot distribution stats in session summary
   EXTRACT_MEMORIES: true,             // Auto-extract durable memories from conversations
   FORK_SUBAGENT: true,                // Implicit context-forking when omitting subagent_type
+  RESUME_COMPACT_PROMPT: true,        // Prompt to compact on /resume + determinate progress bar
   VERIFICATION_AGENT: true,           // Built-in read-only agent for test/verification
   PROMPT_CACHE_BREAK_DETECTION: true, // Detect & log unexpected prompt cache invalidations
   HOOK_PROMPTS: true,                 // Allow tools to request interactive user prompts
@@ -118,7 +186,11 @@ result = await Bun.build({
   format: 'esm',
   splitting: false,
   sourcemap: 'external',
-  minify: false,
+  // Whitespace+syntax only: identifier mangling would break the
+  // constructor.name matching in errors.ts/toolExecution.ts/useCanUseTool.
+  // The SDK build stays unminified — its React/Ink leak check greps import
+  // syntax that minification would rewrite.
+  minify: { whitespace: true, syntax: true, identifiers: false },
   naming: 'cli.mjs',
   define: {
     // MACRO.* build-time constants
@@ -134,10 +206,12 @@ result = await Bun.build({
       JSON.stringify('https://github.com/Gitlawb/openclaude/issues'),
     'MACRO.PACKAGE_URL': JSON.stringify('@gitlawb/openclaude'),
     'MACRO.NATIVE_PACKAGE_URL': 'undefined',
+    'MACRO.VERSION_CHANGELOG': 'undefined',
   },
   plugins: [
     noTelemetryPlugin,
     featureFlagPreprocessPlugin,
+    productionReactPlugin,
     {
       name: 'bun-bundle-shim',
       setup(build) {
@@ -149,16 +223,6 @@ result = await Bun.build({
           [
             '../daemon/main.js',
             'export async function daemonMain() { throw new Error("Daemon mode is unavailable in the open build."); }',
-          ],
-          [
-            '../cli/bg.js',
-            `
-export async function psHandler() { throw new Error("Background sessions are unavailable in the open build."); }
-export async function logsHandler() { throw new Error("Background sessions are unavailable in the open build."); }
-export async function attachHandler() { throw new Error("Background sessions are unavailable in the open build."); }
-export async function killHandler() { throw new Error("Background sessions are unavailable in the open build."); }
-export async function handleBgFlag() { throw new Error("Background sessions are unavailable in the open build."); }
-`,
           ],
           [
             '../cli/handlers/templateJobs.js',
@@ -180,7 +244,7 @@ export async function handleBgFlag() { throw new Error("Background sessions are 
         // before the JS plugin phase runs.
 
         build.onResolve(
-          { filter: /^\.\.\/(daemon\/workerRegistry|daemon\/main|cli\/bg|cli\/handlers\/templateJobs|environment-runner\/main|self-hosted-runner\/main)\.js$/ },
+          { filter: /^\.\.\/(daemon\/workerRegistry|daemon\/main|cli\/handlers\/templateJobs|environment-runner\/main|self-hosted-runner\/main)\.js$/ },
           args => {
             if (!internalFeatureStubModules.has(args.path)) return null
             return {
@@ -222,13 +286,10 @@ export async function handleBgFlag() { throw new Error("Background sessions are 
           'color-diff-napi',
           '@anthropic-ai/mcpb',
           '@ant/claude-for-chrome-mcp',
-          '@anthropic-ai/sandbox-runtime',
           'asciichart',
           'plist',
           'cacache',
           'fuse',
-          'code-excerpt',
-          'stack-utils',
         ]) {
           build.onResolve({ filter: new RegExp(`^${mod}$`) }, () => ({
             path: mod,
@@ -433,9 +494,15 @@ export const createClaudeForChromeMcpServer = noop;
           (args) => {
             const names = missingModuleExports.get(args.path) ?? new Set()
             const exports = [...names].map(n => `export const ${n} = noop;`).join('\n')
+            // The bundle guard used to find Bun's `// missing-module-stub:<path>`
+            // module-boundary comments, but minification strips comments. Emit
+            // the marker as a side-effecting string push instead so treeshaking
+            // and syntax-minify keep the literal in the bundle.
+            const marker = JSON.stringify(`missing-module-stub:${args.path}`)
             return {
               contents: `
 const noop = () => null;
+;(globalThis.__openclaudeStubMarkers ??= []).push(${marker});
 export default noop;
 ${exports}
 `,
@@ -482,6 +549,7 @@ sdkResult = await Bun.build({
       JSON.stringify('https://github.com/Gitlawb/openclaude/issues'),
     'MACRO.PACKAGE_URL': JSON.stringify('@gitlawb/openclaude'),
     'MACRO.NATIVE_PACKAGE_URL': 'undefined',
+    'MACRO.VERSION_CHANGELOG': 'undefined',
   },
   // External: everything TUI-related + native modules
   external: SDK_EXTERNALS,
@@ -501,7 +569,7 @@ sdkResult = await Bun.build({
           '@anthropic-ai/sandbox-runtime',
           'audio-capture-napi', 'audio-capture.node',
           'image-processor-napi', 'modifiers-napi', 'url-handler-napi', 'color-diff-napi',
-          'asciichart', 'plist', 'cacache', 'fuse', 'code-excerpt', 'stack-utils',
+          'asciichart', 'plist', 'cacache', 'fuse',
         ]
         for (const mod of missingModules) {
           const escaped = mod.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
@@ -927,5 +995,87 @@ if (result?.success && sdkResult?.success) {
   })
   if (validation.exitCode !== 0) {
     process.exitCode = 1
+  }
+}
+
+// ── Guard: no unexpected missing-module stubs in the shipped CLI bundle ─────
+// The missing-import scanner above stubs any unresolved relative import to a
+// noop default export. That is correct for a require behind a DISABLED feature
+// flag: the gated branch is dead-code-eliminated and the stub never reaches the
+// bundle. But when a flag is ENABLED, its gated require becomes live and the
+// stub silently degrades a real module to `() => null` — a named export (e.g. a
+// React component) then resolves to `undefined` and crashes the first time that
+// path runs. SnipBoundaryMessage shipped exactly this way (PR #1407): the build
+// passed, smoke passed, unit tests passed, and the UI crashed on the first snip.
+//
+// This guard is a COARSE TRIPWIRE, not proof of reachability. A
+// `missing-module-stub:` marker in dist/cli.mjs does NOT by itself prove the
+// stub is reachable or invoked. The scanner (since #1399) keys missing modules
+// per importer, so a marker means *that* importer resolved to a stub — but the
+// marker can still sit on a path that never actually runs (e.g. a flag-gated
+// require that is enabled yet whose code path is not exercised).
+// So treat a flagged stub as "inspect this", not "confirmed runtime crash".
+// What the guard reliably catches is a NEW stub appearing where none was
+// expected — the regression class above — which is worth a human look before it
+// ships. Fail on any marker that is not explicitly grandfathered below.
+if (result?.success) {
+  // Pre-existing stubs grandfathered when this guard was introduced. Each is a
+  // marker the scanner emitted before this guard existed; each sits behind an
+  // enabled flag and is latent degrade-on-use debt whose source is not mirrored
+  // in this tree — the list is a baseline to detect new regressions, not an
+  // assertion that every entry is a live crash. Do NOT add entries here to
+  // silence the guard for new code — add the real source module, or gate the
+  // path so it is not reachable when the module is absent. An entry here is a
+  // known item to revisit, not a blessing that the stub is safe.
+  // Entries are repo-relative paths from `src/` onward, without extension — the
+  // same shape canonicalStub() produces, so the allowlist reads as the key.
+  const ACCEPTABLE_RUNTIME_STUBS = new Set<string>([])
+
+  // Stub markers are not byte-stable across build hosts: the per-importer
+  // scanner records each stub as the resolved absolute source path, which
+  // differs only by the repo-root prefix (`/home/ubuntu/.../openclaude` locally
+  // vs `/home/runner/work/openclaude/openclaude` on CI). canonicalStub() keys
+  // on the repo-relative path from `src/` onward (see scripts/stubMarkerGuard.ts).
+  const acceptableCanonical = new Set(
+    [...ACCEPTABLE_RUNTIME_STUBS].map(canonicalStub),
+  )
+
+  const bundleText = await Bun.file('dist/cli.mjs').text()
+  // canonical key -> raw marker text (kept for human-readable diagnostics)
+  const stubbed = collectBundleStubs(bundleText)
+  const unexpected = [...stubbed]
+    .filter(([key]) => !acceptableCanonical.has(key))
+    .map(([, raw]) => raw)
+    .sort()
+  const staleAllowlist = [...ACCEPTABLE_RUNTIME_STUBS]
+    .filter(s => !stubbed.has(canonicalStub(s)))
+    .sort()
+
+  if (unexpected.length > 0) {
+    console.error(
+      '\n✗ Build guard: new missing-module stub(s) in the CLI bundle (inspect before shipping):',
+    )
+    for (const s of unexpected) console.error(`    ${s}`)
+    console.error(
+      '  An unresolved relative import was stubbed to a noop default export. If a feature flag\n' +
+        '  made this require live but its source module is absent, named exports become undefined\n' +
+        '  and crash on first use — add the real source module, or gate the path so it is\n' +
+        '  unreachable when the module is missing. If instead the stub sits on a path that\n' +
+        '  never runs, confirm that and add the repo-relative path (from src/, no extension)\n' +
+        '  to ACCEPTABLE_RUNTIME_STUBS in scripts/build.ts with justification.',
+    )
+    process.exitCode = 1
+  } else {
+    console.log(`✓ Bundle guard: no unexpected missing-module stubs`)
+  }
+
+  // Keep the allowlist honest: a grandfathered entry that no longer appears
+  // means the path was fixed or removed — drop it so the list reflects reality.
+  if (staleAllowlist.length > 0) {
+    console.warn(
+      '\n⚠ Build guard: ACCEPTABLE_RUNTIME_STUBS has stale entries no longer in the bundle ' +
+        '(remove them):',
+    )
+    for (const s of staleAllowlist) console.warn(`    ${s}`)
   }
 }

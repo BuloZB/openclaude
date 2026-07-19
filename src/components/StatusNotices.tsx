@@ -20,12 +20,13 @@ async function loadMemoryFiles(): Promise<void> {
   if (memoryFilesPromise) {
     return memoryFilesPromise;
   }
-  memoryFilesPromise = getMemoryFiles().then(files => {
+  const promise = getMemoryFiles().then(files => {
     cachedMemoryFiles = files;
   }).finally(() => {
     memoryFilesPromise = null;
   });
-  return memoryFilesPromise;
+  memoryFilesPromise = promise;
+  return promise;
 }
 
 /**
@@ -44,6 +45,7 @@ export function StatusNotices(t0) {
   const [memoryFiles, setMemoryFiles] = React.useState(cachedMemoryFiles);
   const [localModelContextLoad, setLocalModelContextLoad] = React.useState<LocalModelContextWarning | null | undefined>(undefined);
   const isLocalModel = isActiveProviderLocalModel();
+  const mainLoopModel = useAppState(s => s.mainLoopModel);
   let t1;
   if ($[0] === Symbol.for("react.memo_cache_sentinel")) {
     t1 = () => {
@@ -71,6 +73,8 @@ export function StatusNotices(t0) {
       agentDefinitions,
       memoryFiles,
       async () => toolPermissionContext,
+      undefined,
+      mainLoopModel ?? undefined,
     ).then(warning => {
       if (!cancelled) {
         setLocalModelContextLoad(warning);
@@ -83,10 +87,9 @@ export function StatusNotices(t0) {
     return () => {
       cancelled = true;
     };
-  }, [agentDefinitions, isLocalModel, memoryFiles, toolPermissionContext, tools]);
+  }, [agentDefinitions, isLocalModel, mainLoopModel, memoryFiles, toolPermissionContext, tools]);
   const t2 = getGlobalConfig();
   const permissionMode = useAppState(s => s.toolPermissionContext.mode);
-  const mainLoopModel = useAppState(s => s.mainLoopModel);
   const context: StatusNoticeContext = {
     config: t2,
     agentDefinitions,

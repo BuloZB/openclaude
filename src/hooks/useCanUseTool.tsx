@@ -14,6 +14,7 @@ import type { AssistantMessage } from '../types/message.js';
 import { recordAutoModeDenial } from '../utils/autoModeDenials.js';
 import { clearClassifierChecking, setClassifierApproval, setYoloClassifierApproval } from '../utils/classifierApprovals.js';
 import { logForDebugging } from '../utils/debug.js';
+import type { ClassifierResult } from '../utils/permissions/bashClassifier.js';
 import { AbortError } from '../utils/errors.js';
 import { logError } from '../utils/log.js';
 import type { PermissionDecision } from '../utils/permissions/PermissionResult.js';
@@ -125,6 +126,7 @@ function useCanUseTool(setToolUseConfirmQueue, setToolPermissionContext) {
                 return;
               }
               if (feature("BASH_CLASSIFIER") && result.pendingClassifierCheck && tool.name === BASH_TOOL_NAME && !appState.toolPermissionContext.awaitAutomatedChecksBeforeDialog) {
+                const classifierPlanModeWasActive = toolUseContext.getAppState().toolPermissionContext.mode === "plan";
                 const speculativePromise = peekSpeculativeClassifierCheck((input as {
                   command: string;
                 }).command);
@@ -137,23 +139,21 @@ function useCanUseTool(setToolUseConfirmQueue, setToolPermissionContext) {
                     consumeSpeculativeClassifierCheck((input as {
                       command: string;
                     }).command);
+                    const finalInput = result.updatedInput ?? input as Record<string, unknown>;
+                    const classifierDecision = await ctx.handleClassifierAllow(finalInput, {
+                      type: "classifier" as const,
+                      classifier: "bash_allow" as const,
+                      reason: `Allowed by prompt rule: "${raceResult.result.matchedDescription}"`
+                    }, undefined, classifierPlanModeWasActive);
+                    if (classifierDecision.behavior !== "allow") {
+                      resolve(classifierDecision);
+                      return;
+                    }
                     const matchedRule = raceResult.result.matchedDescription ?? undefined;
                     if (matchedRule) {
                       setClassifierApproval(toolUseID, matchedRule);
                     }
-                    ctx.logDecision({
-                      decision: "accept",
-                      source: {
-                        type: "classifier"
-                      }
-                    });
-                    resolve(ctx.buildAllow(result.updatedInput ?? input as Record<string, unknown>, {
-                      decisionReason: {
-                        type: "classifier" as const,
-                        classifier: "bash_allow" as const,
-                        reason: `Allowed by prompt rule: "${raceResult.result.matchedDescription}"`
-                      }
-                    }));
+                    resolve(classifierDecision);
                     return;
                   }
                 }
@@ -190,12 +190,12 @@ function useCanUseTool(setToolUseConfirmQueue, setToolPermissionContext) {
   }
   return t0;
 }
-function _temp2(res) {
+function _temp2(res: (value: { type: 'timeout' }) => void) {
   return setTimeout(res, 2000, {
     type: "timeout" as const
   });
 }
-function _temp(r) {
+function _temp(r: ClassifierResult) {
   return {
     type: "result" as const,
     result: r

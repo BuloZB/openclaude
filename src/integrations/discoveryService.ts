@@ -29,11 +29,14 @@ import {
   probeAtomicChatReadiness,
   probeOllamaGenerationReadiness,
 } from '../utils/providerDiscovery.js'
+import { firstUsableCredential, hasInvalidCredentialPlaceholder } from '../services/api/credentialPool.js'
+import { parseCustomHeadersEnv } from '../utils/providerCustomHeaders.js'
 import { isEssentialTrafficOnly } from '../utils/privacyLevel.js'
 
 export type RouteDiscoveryResult = {
   routeId: string
   models: ModelCatalogEntry[]
+  discoveredModelCount?: number
   stale: boolean
   error: DiscoveryCacheError | null
   source: 'network' | 'cache' | 'stale-cache' | 'static' | 'error'
@@ -72,7 +75,7 @@ function getCatalogEntries(
   return getRouteCatalog(routeId)?.models ?? []
 }
 
-function getDiscoveryCacheTtlMs(
+export function getDiscoveryCacheTtlMs(
   routeId: string,
 ): number {
   const ttl = getRouteCatalog(routeId)?.discoveryCacheTtl ?? 0
@@ -102,7 +105,10 @@ function normalizeDiscoveryCacheHeaders(
   headers: Record<string, string> | undefined,
 ): Array<[string, string]> {
   return Object.entries(headers ?? {})
-    .map(([name, value]) => [name.trim().toLowerCase(), value.trim()] as const)
+    .map(([name, value]): [string, string] => [
+      name.trim().toLowerCase(),
+      value.trim(),
+    ])
     .filter(([name, value]) => name && value)
     .sort(([leftName], [rightName]) => leftName.localeCompare(rightName))
 }
@@ -151,25 +157,34 @@ function getRouteDiscoveryApiKey(
     return undefined
   }
 
-  if (options?.apiKey?.trim()) {
-    return options.apiKey.trim()
+  if (hasInvalidCredentialPlaceholder(options?.apiKey)) {
+    return undefined
   }
 
-  return resolveRouteCredentialValue({
-    routeId,
-    processEnv: process.env,
-  })
+  const optionCredential = firstUsableCredential(options?.apiKey)
+  if (optionCredential) {
+    return optionCredential
+  }
+
+  return firstUsableCredential(
+    resolveRouteCredentialValue({
+      routeId,
+      processEnv: process.env,
+    }),
+  )
 }
 
-function getRouteDiscoveryHeaders(
+export function getRouteDiscoveryHeaders(
   routeId: string,
   options?: { headers?: Record<string, string> },
 ): Record<string, string> | undefined {
   const transportConfig = getRouteDescriptor(routeId)?.transportConfig
+  const acceptsCallerHeaders =
+    getRouteCatalog(routeId)?.discovery?.requiresAuth !== false
   const headers = {
     ...(transportConfig?.headers ?? {}),
     ...(transportConfig?.openaiShim?.headers ?? {}),
-    ...(options?.headers ?? {}),
+    ...(acceptsCallerHeaders ? (options?.headers ?? {}) : {}),
   }
 
   return Object.keys(headers).length > 0 ? headers : undefined
@@ -209,6 +224,26 @@ function mergeCatalogEntries(
   }
 
   return merged
+}
+
+function dedupeDiscoveredEntries(
+  entries: ModelCatalogEntry[],
+): ModelCatalogEntry[] {
+  const deduped: ModelCatalogEntry[] = []
+  const seenApiNames = new Set<string>()
+
+  for (const entry of entries) {
+    const apiName = entry.apiName.trim()
+    const apiNameKey = apiName.toLowerCase()
+    if (!apiName || seenApiNames.has(apiNameKey)) {
+      continue
+    }
+
+    seenApiNames.add(apiNameKey)
+    deduped.push({ ...entry, apiName })
+  }
+
+  return deduped
 }
 
 async function runDiscovery(
@@ -253,7 +288,7 @@ async function runDiscovery(
             entries.push(entry)
           }
         }
-        return entries
+        return dedupeDiscoveredEntries(entries)
       }
 
       const models = await listOpenAICompatibleModels({
@@ -302,6 +337,7 @@ export async function discoverModelsForRoute(
       return {
         routeId,
         models: mergeCatalogEntries(staticEntries, cached.models),
+        discoveredModelCount: cached.models.length,
         stale: false,
         error: cached.error,
         source: 'cache',
@@ -319,6 +355,7 @@ export async function discoverModelsForRoute(
       return {
         routeId,
         models: mergeCatalogEntries(staticEntries, staleEntry.models),
+        discoveredModelCount: staleEntry.models.length,
         stale,
         error: staleEntry.error,
         source: stale ? 'stale-cache' : 'cache',
@@ -344,6 +381,7 @@ export async function discoverModelsForRoute(
     return {
       routeId,
       models: mergeCatalogEntries(staticEntries, discovered),
+      discoveredModelCount: discovered.length,
       stale: false,
       error: null,
       source: 'network',
@@ -359,6 +397,7 @@ export async function discoverModelsForRoute(
       return {
         routeId,
         models: mergeCatalogEntries(staticEntries, staleEntry.models),
+        discoveredModelCount: staleEntry.models.length,
         stale: true,
         error: staleEntry.error,
         source: 'stale-cache',
@@ -432,21 +471,26 @@ export async function refreshStartupDiscoveryForActiveRoute(
     }) ??
     resolveRouteIdFromBaseUrl(baseUrl)
 
-  if (!routeId || routeId === 'anthropic' || routeId === 'custom') {
+  if (!routeId || routeId === 'anthropic') {
     return null
   }
 
   return refreshStartupDiscoveryForRoute(routeId, {
     baseUrl,
-    headers: options?.headers,
-    apiKey:
-      options?.apiKey ??
-      resolveRouteCredentialValue({
-        routeId,
-        baseUrl,
-        processEnv,
-        activeProfileProvider: options?.activeProfileProvider,
-      }),
+    headers:
+      options?.headers ??
+      parseCustomHeadersEnv(processEnv.ANTHROPIC_CUSTOM_HEADERS),
+    apiKey: hasInvalidCredentialPlaceholder(options?.apiKey)
+      ? undefined
+      : firstUsableCredential(options?.apiKey) ??
+        firstUsableCredential(
+          resolveRouteCredentialValue({
+            routeId,
+            baseUrl,
+            processEnv,
+            activeProfileProvider: options?.activeProfileProvider,
+          }),
+        ),
   })
 }
 

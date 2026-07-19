@@ -3,7 +3,7 @@ import {
   acquireSharedMutationLock,
   releaseSharedMutationLock,
 } from '../test/sharedMutationLock.js'
-import * as actualProviders from './model/providers.js'
+import { asMockFetch } from '../test/typedMocks.js'
 
 const originalEnv = { ...process.env }
 const originalFetch = globalThis.fetch
@@ -17,6 +17,9 @@ function getMockApiProvider() {
 
 async function importFreshModule() {
   mock.restore()
+  const actualProviders = await import(
+    `./model/providers.ts?actual=${Date.now()}-${Math.random()}`,
+  )
   mock.module('./model/providers.js', () => ({
     ...actualProviders,
     getAPIProvider: getMockApiProvider,
@@ -46,7 +49,7 @@ describe('preconnectAnthropicApi', () => {
   // getAPIProvider() to 'firstParty' here and break these assertions.
   test('does not fetch when OpenAI mode is enabled', async () => {
     const fetchMock = mock(() => Promise.resolve(new Response(null, { status: 200 })))
-    globalThis.fetch = fetchMock as typeof globalThis.fetch
+    globalThis.fetch = asMockFetch(fetchMock)
 
     const { preconnectAnthropicApi } = await importFreshModule()
     preconnectAnthropicApi('openai')
@@ -56,7 +59,7 @@ describe('preconnectAnthropicApi', () => {
 
   test('does not fetch when Gemini mode is enabled', async () => {
     const fetchMock = mock(() => Promise.resolve(new Response(null, { status: 200 })))
-    globalThis.fetch = fetchMock as typeof globalThis.fetch
+    globalThis.fetch = asMockFetch(fetchMock)
 
     const { preconnectAnthropicApi } = await importFreshModule()
     preconnectAnthropicApi('gemini')
@@ -66,7 +69,7 @@ describe('preconnectAnthropicApi', () => {
 
   test('does not fetch when GitHub mode is enabled', async () => {
     const fetchMock = mock(() => Promise.resolve(new Response(null, { status: 200 })))
-    globalThis.fetch = fetchMock as typeof globalThis.fetch
+    globalThis.fetch = asMockFetch(fetchMock)
 
     const { preconnectAnthropicApi } = await importFreshModule()
     preconnectAnthropicApi('github')
@@ -102,12 +105,23 @@ describe('preconnectAnthropicApi', () => {
     delete process.env.CLAUDE_CODE_CLIENT_KEY
 
     const fetchMock = mock(() => Promise.resolve(new Response(null, { status: 200 })))
-    globalThis.fetch = fetchMock as typeof globalThis.fetch
+    globalThis.fetch = asMockFetch(fetchMock)
 
     const { preconnectAnthropicApi } = await importFreshModule()
     preconnectAnthropicApi('firstParty')
 
     expect(fetchMock).toHaveBeenCalledTimes(1)
+  })
+
+  test('does not preconnect to a custom Anthropic endpoint', async () => {
+    process.env.ANTHROPIC_BASE_URL = 'https://tenant.example'
+    const fetchMock = mock(() => Promise.resolve(new Response(null, { status: 200 })))
+    globalThis.fetch = asMockFetch(fetchMock)
+
+    const { preconnectAnthropicApi } = await importFreshModule()
+    preconnectAnthropicApi('firstParty')
+
+    expect(fetchMock).not.toHaveBeenCalled()
   })
 
   test('keeps non-mocked provider exports available to neighboring imports', async () => {

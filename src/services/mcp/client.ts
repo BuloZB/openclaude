@@ -36,7 +36,6 @@ import {
   type PromptMessage,
   type ResourceLink,
 } from '@modelcontextprotocol/sdk/types.js'
-import mapValues from 'lodash-es/mapValues.js'
 import memoize from 'lodash-es/memoize.js'
 import zipObject from 'lodash-es/zipObject.js'
 import pMap from 'p-map'
@@ -78,6 +77,7 @@ import {
   getBinaryBlobSavedMessage,
   getFormatDescription,
   getLargeOutputInstructions,
+  getLargeOutputPersistenceFailureInstructions,
   persistBinaryContent,
 } from '../../utils/mcpOutputStorage.js'
 import {
@@ -257,6 +257,7 @@ import { dirname, join } from 'path'
 import { getClaudeConfigHomeDir } from '../../utils/envUtils.js'
 /* eslint-enable @typescript-eslint/no-require-imports */
 import { jsonParse, jsonStringify } from '../../utils/slowOperations.js'
+import { jsonRedactor } from '../../utils/redaction.js'
 
 const MCP_AUTH_CACHE_TTL_MS = 15 * 60 * 1000 // 15 min
 
@@ -569,6 +570,29 @@ type InProcessMcpServer = {
   close(): Promise<void>
 }
 
+const MAX_MCP_STDERR_CHARS = 256 * 1024
+const MCP_STDERR_TRUNCATED_MARKER = '\n...[stderr truncated]'
+
+export function appendBoundedMcpStderr(
+  current: string,
+  chunk: Buffer | string,
+): string {
+  if (current.includes(MCP_STDERR_TRUNCATED_MARKER)) {
+    return current
+  }
+
+  const text = typeof chunk === 'string' ? chunk : chunk.toString()
+  const next = current + text
+  if (next.length <= MAX_MCP_STDERR_CHARS) {
+    return next
+  }
+
+  return (
+    next.slice(0, MAX_MCP_STDERR_CHARS - MCP_STDERR_TRUNCATED_MARKER.length) +
+    MCP_STDERR_TRUNCATED_MARKER
+  )
+}
+
 export async function cleanupFailedConnection(
   transport: Pick<Transport, 'close'>,
   inProcessServer?: Pick<InProcessMcpServer, 'close'>,
@@ -578,6 +602,21 @@ export async function cleanupFailedConnection(
   }
 
   await transport.close().catch(() => {})
+}
+
+export function logMcpServerStderr(
+  name: string,
+  stderrOutput: string,
+  connectedSuccessfully: boolean,
+): void {
+  if (!stderrOutput) return
+
+  const message = `Server stderr: ${stderrOutput}`
+  if (connectedSuccessfully) {
+    logMCPDebug(name, message)
+  } else {
+    logMCPError(name, message)
+  }
 }
 
 function isLocalMcpServer(config: ScopedMcpServerConfig): boolean {
@@ -768,8 +807,8 @@ export const connectToServer = memoize(
         }
 
         // Redact sensitive headers before logging
-        const wsHeadersForLogging = mapValues(wsHeaders, (value, key) =>
-          key.toLowerCase() === 'authorization' ? '[REDACTED]' : value,
+        const wsHeadersForLogging = JSON.parse(
+          JSON.stringify(wsHeaders, jsonRedactor),
         )
 
         logMCPDebug(
@@ -859,10 +898,11 @@ export const connectToServer = memoize(
 
         // Redact sensitive headers before logging
         const headersForLogging = transportOptions.requestInit?.headers
-          ? mapValues(
-            transportOptions.requestInit.headers as Record<string, string>,
-            (value, key) =>
-              key.toLowerCase() === 'authorization' ? '[REDACTED]' : value,
+          ? JSON.parse(
+            JSON.stringify(
+              transportOptions.requestInit.headers as Record<string, string>,
+              jsonRedactor,
+            ),
           )
           : undefined
 
@@ -960,11 +1000,17 @@ export const connectToServer = memoize(
         transport = clientTransport
         logMCPDebug(name, `In-process Computer Use MCP server started`)
       } else if (serverRef.type === 'stdio' || !serverRef.type) {
-        const finalCommand =
-          process.env.CLAUDE_CODE_SHELL_PREFIX || serverRef.command
-        const finalArgs = process.env.CLAUDE_CODE_SHELL_PREFIX
-          ? [[serverRef.command, ...serverRef.args].join(' ')]
-          : serverRef.args
+        // Split the prefix into separate args so we hand a real array to the
+        // MCP SDK's stdio transport.  Joining the server command + its args
+        // into one string and putting that single string inside a one-element
+        // array causes the SDK to shell-invoke the whole blob, letting shell
+        // metacharacters in serverRef.args run arbitrary commands before the
+        // target binary even starts.
+        const { command: finalCommand, args: finalArgs } = buildMcpStdioCommand(
+          serverRef.command,
+          serverRef.args ?? [],
+          process.env.CLAUDE_CODE_SHELL_PREFIX,
+        )
         transport = new StdioClientTransport({
           command: finalCommand,
           args: finalArgs,
@@ -987,14 +1033,7 @@ export const connectToServer = memoize(
         const stdioTransport = transport as StdioClientTransport
         if (stdioTransport.stderr) {
           stderrHandler = (data: Buffer) => {
-            // Cap stderr accumulation to prevent unbounded memory growth
-            if (stderrOutput.length < 64 * 1024 * 1024) {
-              try {
-                stderrOutput += data.toString()
-              } catch {
-                // Ignore errors from exceeding max string length
-              }
-            }
+            stderrOutput = appendBoundedMcpStderr(stderrOutput, data)
           }
           stdioTransport.stderr.on('data', stderrHandler)
         }
@@ -1099,7 +1138,7 @@ export const connectToServer = memoize(
       try {
         await Promise.race([connectPromise, timeoutPromise])
         if (stderrOutput) {
-          logMCPError(name, `Server stderr: ${stderrOutput}`)
+          logMcpServerStderr(name, stderrOutput, true)
           stderrOutput = '' // Release accumulated string to prevent memory growth
         }
         const elapsed = Date.now() - connectStartTime
@@ -1170,7 +1209,7 @@ export const connectToServer = memoize(
           await cleanupFailedConnection(transport)
         }
         if (stderrOutput) {
-          logMCPError(name, `Server stderr: ${stderrOutput}`)
+          logMcpServerStderr(name, stderrOutput, false)
         }
         throw error
       }
@@ -2819,20 +2858,22 @@ export async function processMCPResult(
 
   if (isPersistError(persistResult)) {
     // If file save failed, fall back to returning truncated content info
-    const contentLength = contentStr.length
     logEvent('tengu_mcp_large_result_handled', {
       outcome: 'truncated',
       reason: 'persist_failed',
       sizeEstimateTokens,
     } as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS)
-    return `Error: result (${contentLength.toLocaleString()} characters) exceeds maximum allowed tokens. Failed to save output to file: ${persistResult.error}. If this MCP server provides pagination or filtering tools, use them to retrieve specific portions of the data.`
+    return getLargeOutputPersistenceFailureInstructions(
+      contentStr,
+      persistResult.error,
+    )
   }
 
   logEvent('tengu_mcp_large_result_handled', {
     outcome: 'persisted',
     reason: 'file_saved',
     sizeEstimateTokens,
-    persistedSizeChars: persistResult.originalSize,
+    persistedSizeBytes: persistResult.originalSize,
   } as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS)
 
   const formatDescription = getFormatDescription(type, schema)
@@ -3309,6 +3350,66 @@ function extractToolUseId(message: AssistantMessage): string | undefined {
     return undefined
   }
   return message.message.content[0].id
+}
+
+/**
+ * Build the command and args for a stdio MCP transport, applying the
+ * CLAUDE_CODE_SHELL_PREFIX split into separate argv entries. This
+ * ensures the MCP SDK receives a proper command + args[] instead of
+ * a shell-joined string, preventing shell metacharacter injection
+ * from serverRef.args.
+ *
+ * When a prefix is set, prefixParts[0] becomes the command and
+ * prefixParts[1..] + original command + original args become the
+ * argv array.
+ */
+export function buildMcpStdioCommand(
+  command: string,
+  args: string[],
+  shellPrefix?: string,
+): { command: string; args: string[] } {
+  if (!shellPrefix) {
+    return { command, args }
+  }
+
+  let finalCommand: string
+  let prefixArgs: string[]
+
+  // Split on the last " -c" to preserve spaced executable path
+  // (e.g. "C:\Program Files\Git\bin\bash.exe -c"). When no " -c" is
+  // present, fall back to plain whitespace split.
+  const cIndex = shellPrefix.lastIndexOf(' -c')
+  if (cIndex > 0) {
+    finalCommand = shellPrefix.substring(0, cIndex)
+    prefixArgs = ['-c', ...shellPrefix.substring(cIndex + 3).split(/\s+/).filter(Boolean)]
+  } else {
+    const parts = shellPrefix.split(/\s+/).filter(Boolean)
+    if (parts.length === 0) return { command, args }
+    finalCommand = parts[0]
+    prefixArgs = parts.slice(1)
+  }
+
+  // Shell -c prefix (e.g. sh -c, bash -c): everything after -c is a single
+  // shell command string, not individual argv entries. Without this join,
+  // sh -c runs only the first word as the command string and treats the
+  // remaining entries as shell positional parameters ($0, $1, ...), so the
+  // MCP server never receives its configured arguments.
+  //
+  // Each original command/arg is single-quote-escaped to prevent shell
+  // injection via MCP server args (e.g. --path=/tmp; rm -rf / would
+  // otherwise execute the semicolon as a command separator).
+  if (prefixArgs.includes('-c')) {
+    const cmdStr = [command, ...args].map(a => `'${a.replace(/'/g, "'\\''")}'`).join(' ')
+    return {
+      command: finalCommand,
+      args: [...prefixArgs, cmdStr],
+    }
+  }
+
+  return {
+    command: finalCommand,
+    args: [...prefixArgs, command, ...args],
+  }
 }
 
 /**

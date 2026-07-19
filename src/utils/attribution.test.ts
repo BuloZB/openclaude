@@ -8,12 +8,14 @@ import {
 } from '../bootstrap/state.js'
 import * as actualModel from './model/model.js'
 import * as actualProviders from './model/providers.js'
-import * as actualSettings from './settings/settings.js'
 import {
   resetSettingsCache,
   setSessionSettingsCache,
 } from './settings/settingsCache.js'
+import * as realSettings from './settings/settings.js'
 import type { SettingsJson } from './settings/types.js'
+
+const actualSettings = { ...realSettings }
 
 let getAttributionTexts: (typeof import('./attribution.js'))['getAttributionTexts']
 let getDefaultCommitCoAuthorEmail: (typeof import('./attribution.js'))[
@@ -28,15 +30,16 @@ let getEnhancedPRAttribution: (typeof import('./attribution.js'))[
 let testSettings: SettingsJson = {}
 
 const originalEnv = {
-  CLAUDE_CODE_USE_OPENAI: process.env.CLAUDE_CODE_USE_OPENAI,
+  ANTHROPIC_MODEL: process.env.ANTHROPIC_MODEL,
+  CLAUDE_CODE_PROVIDER_PROFILE_ENV_APPLIED:
+    process.env.CLAUDE_CODE_PROVIDER_PROFILE_ENV_APPLIED,
+  CLAUDE_CODE_USE_BEDROCK: process.env.CLAUDE_CODE_USE_BEDROCK,
+  CLAUDE_CODE_USE_FOUNDRY: process.env.CLAUDE_CODE_USE_FOUNDRY,
   CLAUDE_CODE_USE_GEMINI: process.env.CLAUDE_CODE_USE_GEMINI,
   CLAUDE_CODE_USE_GITHUB: process.env.CLAUDE_CODE_USE_GITHUB,
   CLAUDE_CODE_USE_MISTRAL: process.env.CLAUDE_CODE_USE_MISTRAL,
-  CLAUDE_CODE_USE_BEDROCK: process.env.CLAUDE_CODE_USE_BEDROCK,
+  CLAUDE_CODE_USE_OPENAI: process.env.CLAUDE_CODE_USE_OPENAI,
   CLAUDE_CODE_USE_VERTEX: process.env.CLAUDE_CODE_USE_VERTEX,
-  CLAUDE_CODE_USE_FOUNDRY: process.env.CLAUDE_CODE_USE_FOUNDRY,
-  CLAUDE_CODE_PROVIDER_PROFILE_ENV_APPLIED:
-    process.env.CLAUDE_CODE_PROVIDER_PROFILE_ENV_APPLIED,
   CLAUDE_CODE_PROVIDER_PROFILE_ENV_APPLIED_ID:
     process.env.CLAUDE_CODE_PROVIDER_PROFILE_ENV_APPLIED_ID,
   NVIDIA_NIM: process.env.NVIDIA_NIM,
@@ -44,7 +47,6 @@ const originalEnv = {
   OPENAI_BASE_URL: process.env.OPENAI_BASE_URL,
   OPENAI_API_BASE: process.env.OPENAI_API_BASE,
   OPENAI_API_KEY: process.env.OPENAI_API_KEY,
-  ANTHROPIC_MODEL: process.env.ANTHROPIC_MODEL,
   ANTHROPIC_BASE_URL: process.env.ANTHROPIC_BASE_URL,
   ANTHROPIC_DEFAULT_OPUS_MODEL:
     process.env.ANTHROPIC_DEFAULT_OPUS_MODEL,
@@ -135,12 +137,15 @@ beforeEach(async () => {
     ...actualProviders,
     getAPIProvider: () => 'openai',
   }))
+  // Stub settings directly so attribution.ts observes this test's intended
+  // settings even when a previous serialized Bun test has mocked the settings
+  // module or a nonced import creates a separate cache instance.
   mock.module('./settings/settings.js', () => ({
     ...actualSettings,
     getInitialSettings: () => testSettings,
     getSettings_DEPRECATED: () => testSettings,
+    getSettingsForSource: () => testSettings,
   }))
-
   const attribution = await import(
     `./attribution.ts?attributionTest=${Date.now()}-${Math.random()}`
   )
@@ -154,6 +159,7 @@ afterEach(() => {
   mock.restore()
   resetStateForTests()
   resetSettingsCache()
+  testSettings = {}
   setClientType(originalClientType)
   setMainLoopModelOverride(originalMainLoopModelOverride)
   mock.module('./model/model.js', () => actualModel)
@@ -190,7 +196,7 @@ describe('getDefaultCommitCoAuthorName', () => {
         apiProvider: 'firstParty',
         isInternalRepo: false,
       }),
-    ).toBe('Claude Opus 4.6')
+    ).toBe('Claude Opus 4.8')
   })
 
   it('sanitizes unknown internal Claude co-author names', () => {
@@ -204,9 +210,13 @@ describe('getDefaultCommitCoAuthorName', () => {
   })
 
   it('does not duplicate the Claude prefix for Claude model names', () => {
+    // Use a model the public-name map recognizes (it keys on dot form) so this
+    // exercises the real de-dup path — getPublicModelDisplayName already returns
+    // a "Claude …"-prefixed name — rather than coincidentally hitting the
+    // unknown-model fallback.
     expect(
       getDefaultCommitCoAuthorName({
-        model: 'claude-opus-4-6',
+        model: 'claude-opus-4.6',
         apiProvider: 'firstParty',
         isInternalRepo: false,
       }),
@@ -265,9 +275,60 @@ describe('getAttributionTexts', () => {
   it('preserves includeCoAuthoredBy true as an explicit old-default opt-in', () => {
     useSettings({ includeCoAuthoredBy: true })
 
+    const attribution = getAttributionTexts()
+    expect(attribution.commit).toStartWith('Co-Authored-By: ')
+    expect(attribution.commit).toEndWith(' <openclaude@gitlawb.com>')
+    expect(attribution.pr).toBe(defaultPrAttribution)
+  })
+
+  it('uses git.addAICoAuthor as an explicit generated commit opt-in', () => {
+    useSettings({ git: { addAICoAuthor: true } })
+
+    const attribution = getAttributionTexts()
+    expect(attribution.commit).toStartWith('Co-Authored-By: ')
+    expect(attribution.pr).toBe('')
+  })
+
+  it('uses git.addGeneratedWithFooter as an explicit generated PR opt-in', () => {
+    useSettings({ git: { addGeneratedWithFooter: true } })
+
+    const attribution = getAttributionTexts()
+    expect(attribution.commit).toBe('')
+    expect(attribution.pr).toBe(defaultPrAttribution)
+  })
+
+  it('lets git.addAICoAuthor false block legacy generated commit attribution', () => {
+    useSettings({ includeCoAuthoredBy: true, git: { addAICoAuthor: false } })
+
     expect(getAttributionTexts()).toEqual({
-      commit: 'Co-Authored-By: OpenClaude (gpt-5.5) <openclaude@gitlawb.com>',
+      commit: '',
       pr: defaultPrAttribution,
+    })
+  })
+
+  it('lets git.addGeneratedWithFooter false block legacy generated PR attribution', () => {
+    useSettings({
+      includeCoAuthoredBy: true,
+      git: { addGeneratedWithFooter: false },
+    })
+
+    const attribution = getAttributionTexts()
+    expect(attribution.commit).toStartWith('Co-Authored-By: ')
+    expect(attribution.pr).toBe('')
+  })
+
+  it('does not block explicit custom attribution when generated attribution is disabled', () => {
+    useSettings({
+      attribution: {
+        commit: 'Signed-off-by: Human <h@example.com>',
+        pr: 'Reviewed by release engineering.',
+      },
+      git: { addAICoAuthor: false, addGeneratedWithFooter: false },
+    })
+
+    expect(getAttributionTexts()).toEqual({
+      commit: 'Signed-off-by: Human <h@example.com>',
+      pr: 'Reviewed by release engineering.',
     })
   })
 
@@ -348,5 +409,26 @@ describe('getEnhancedPRAttribution', () => {
     await expect(getEnhancedPRAttribution(() => ({} as never))).resolves.toBe(
       defaultPrAttribution,
     )
+  })
+
+  it('uses git.addGeneratedWithFooter as an explicit opt-in to generated PR attribution', async () => {
+    useSettings({ git: { addGeneratedWithFooter: true } })
+
+    await expect(getEnhancedPRAttribution(() => ({} as never))).resolves.toBe(
+      defaultPrAttribution,
+    )
+  })
+
+  it('lets git.addGeneratedWithFooter false block legacy generated PR attribution', async () => {
+    useSettings({
+      includeCoAuthoredBy: true,
+      git: { addGeneratedWithFooter: false },
+    })
+
+    await expect(
+      getEnhancedPRAttribution(() => {
+        throw new Error('app state should not be read when PR attribution is blocked')
+      }),
+    ).resolves.toBe('')
   })
 })

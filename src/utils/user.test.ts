@@ -6,7 +6,6 @@ import {
 } from '../test/sharedMutationLock.js'
 import * as realAuth from './auth.js'
 import * as realConfig from './config.js'
-import * as realCwd from './cwd.js'
 import * as realEnv from './env.js'
 import * as realEnvUtils from './envUtils.js'
 
@@ -17,7 +16,22 @@ async function importFreshUserModule() {
   return import(`./user.ts?ts=${Date.now()}-${Math.random()}`)
 }
 
-function installCommonMocks(options?: {
+async function importActualUserTestDeps() {
+  const nonce = `${Date.now()}-${Math.random()}`
+  const [authModule, configModule, execaModule] = await Promise.all([
+    import(`./auth.js?ts=${nonce}`),
+    import(`./config.js?ts=${nonce}`),
+    import('execa'),
+  ])
+
+  return {
+    authModule,
+    configModule,
+    execaModule,
+  }
+}
+
+async function installCommonMocks(options?: {
   oauthEmail?: string
   gitEmail?: string
 }) {
@@ -27,9 +41,10 @@ function installCommonMocks(options?: {
   // every other test file that imports state.js (e.g. SDK CON-1 tests).
   // The dynamic import (importFreshUserModule) will use the real state.js,
   // which is fine — these tests only assert email, not sessionId.
+  const { authModule, configModule, execaModule } = await importActualUserTestDeps()
 
   mock.module('./auth.js', () => ({
-    ...realAuth,
+    ...authModule,
     getOauthAccountInfo: () =>
       options?.oauthEmail
         ? {
@@ -43,14 +58,9 @@ function installCommonMocks(options?: {
   }))
 
   mock.module('./config.js', () => ({
-    ...realConfig,
+    ...configModule,
     getGlobalConfig: () => ({}),
     getOrCreateUserID: () => 'device-test',
-  }))
-
-  mock.module('./cwd.js', () => ({
-    ...realCwd,
-    getCwd: () => 'C:\\repo',
   }))
 
   mock.module('./env.js', () => ({
@@ -66,10 +76,16 @@ function installCommonMocks(options?: {
   }))
 
   mock.module('execa', () => ({
-    ...realExeca,
+    ...execaModule,
     execa: async () => ({
       exitCode: options?.gitEmail ? 0 : 1,
       stdout: options?.gitEmail ?? '',
+    }),
+    execaSync: () => ({
+      exitCode: 1,
+      stdout: '',
+      stderr: '',
+      failed: true,
     }),
   }))
 }
@@ -83,7 +99,6 @@ afterEach(() => {
     mock.restore()
     mock.module('./auth.js', () => realAuth)
     mock.module('./config.js', () => realConfig)
-    mock.module('./cwd.js', () => realCwd)
     mock.module('./env.js', () => realEnv)
     mock.module('./envUtils.js', () => realEnvUtils)
     mock.module('execa', () => realExeca)
@@ -104,7 +119,7 @@ describe('user email fallbacks', () => {
     process.env.COO_CREATOR = 'alice'
     ;(globalThis as Record<string, unknown>).MACRO = { VERSION: '0.0.0' }
 
-    installCommonMocks()
+    await installCommonMocks()
 
     const { getCoreUserData } = await importFreshUserModule()
     const result = getCoreUserData()
@@ -117,7 +132,7 @@ describe('user email fallbacks', () => {
     process.env.COO_CREATOR = 'alice'
     ;(globalThis as Record<string, unknown>).MACRO = { VERSION: '0.0.0' }
 
-    installCommonMocks({ gitEmail: 'git@example.com' })
+    await installCommonMocks({ gitEmail: 'git@example.com' })
 
     const { initUser, getCoreUserData } = await importFreshUserModule()
     await initUser()
