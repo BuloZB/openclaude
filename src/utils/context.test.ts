@@ -29,6 +29,7 @@ const originalEnv = {
     process.env.CLAUDE_CODE_PROVIDER_PROFILE_ENV_APPLIED_ID,
   MINIMAX_API_KEY: process.env.MINIMAX_API_KEY,
   XAI_API_KEY: process.env.XAI_API_KEY,
+  LONGCAT_API_KEY: process.env.LONGCAT_API_KEY,
   CLAUDE_CODE_MAX_CONTEXT_TOKENS: process.env.CLAUDE_CODE_MAX_CONTEXT_TOKENS,
   USER_TYPE: process.env.USER_TYPE,
 }
@@ -49,6 +50,7 @@ beforeEach(async () => {
   delete process.env.CLAUDE_CODE_PROVIDER_PROFILE_ENV_APPLIED_ID
   delete process.env.MINIMAX_API_KEY
   delete process.env.XAI_API_KEY
+  delete process.env.LONGCAT_API_KEY
   delete process.env.CLAUDE_CODE_MAX_CONTEXT_TOKENS
   delete process.env.USER_TYPE
 })
@@ -124,6 +126,11 @@ afterEach(() => {
       delete process.env.XAI_API_KEY
     } else {
       process.env.XAI_API_KEY = originalEnv.XAI_API_KEY
+    }
+    if (originalEnv.LONGCAT_API_KEY === undefined) {
+      delete process.env.LONGCAT_API_KEY
+    } else {
+      process.env.LONGCAT_API_KEY = originalEnv.LONGCAT_API_KEY
     }
     if (originalEnv.CLAUDE_CODE_MAX_CONTEXT_TOKENS === undefined) {
       delete process.env.CLAUDE_CODE_MAX_CONTEXT_TOKENS
@@ -832,6 +839,26 @@ test('Kimi Code kimi-for-coding uses provider-specific context and output caps',
     default: 32_768,
     upperLimit: 32_768,
   })
+})
+
+test('Kimi Code K3 1M choice uses the Allegretto cap', () => {
+  process.env.CLAUDE_CODE_USE_OPENAI = '1'
+  process.env.OPENAI_BASE_URL = 'https://api.kimi.com/coding/v1'
+  delete process.env.CLAUDE_CODE_MAX_OUTPUT_TOKENS
+
+  expect(getContextWindowForModel('k3')).toBe(1_048_576)
+  expect(getModelMaxOutputTokens('k3')).toEqual({
+    default: 32_768,
+    upperLimit: 32_768,
+  })
+})
+
+test('Kimi Code K3 256K catalog choice uses the Moderato cap', () => {
+  process.env.CLAUDE_CODE_USE_OPENAI = '1'
+  process.env.OPENAI_BASE_URL = 'https://api.kimi.com/coding/v1'
+  delete process.env.CLAUDE_CODE_MAX_OUTPUT_TOKENS
+
+  expect(getContextWindowForModel('k3-256k')).toBe(262_144)
 })
 
 test('DashScope glm-5 uses provider-specific context and output caps', () => {

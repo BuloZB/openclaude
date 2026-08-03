@@ -136,6 +136,23 @@ export default defineGateway({
         modelDescriptorId: 'nvidia/nemotron-3-ultra-550b-a55b:free',
         notes: 'Free',
       },
+      // Time-boxed free window on the gateway (delists itself 2026-08-03).
+      {
+        id: 'opengateway-ling-3.0-flash-free',
+        apiName: 'inclusionai/ling-3.0-flash:free',
+        label: 'Ling 3.0 Flash Free (via Opengateway)',
+        modelDescriptorId: 'inclusionai/ling-3.0-flash:free',
+        notes: 'Free',
+      },
+      // Macaron V1 Tall — served by the gateway via direct Novita (not on
+      // OpenRouter). Free launch window; the gateway delists it 2026-08-10.
+      {
+        id: 'opengateway-macaron-v1-tall',
+        apiName: 'mindai/macaron-v1-tall',
+        label: 'Macaron V1 Tall (via Opengateway)',
+        modelDescriptorId: 'mindai/macaron-v1-tall',
+        notes: 'Free',
+      },
       {
         id: 'opengateway-tencent-hy3',
         apiName: 'tencent/hy3',

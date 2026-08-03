@@ -25,6 +25,20 @@ test('resolveProviderRequest exposes model-query thinking defaults', () => {
   expect(request.thinking).toEqual({ type: 'disabled' })
 })
 
+test('resolveProviderRequest forces LongCat onto chat completions', () => {
+  const request = resolveProviderRequest({
+    processEnv: {
+      CLAUDE_CODE_USE_OPENAI: '1',
+      LONGCAT_API_KEY: 'longcat-key',
+      OPENAI_BASE_URL: 'https://api.longcat.chat/openai/v1',
+      OPENAI_MODEL: 'LongCat-2.0',
+      OPENAI_API_FORMAT: 'responses',
+    },
+  })
+
+  expect(request.transport).toBe('chat_completions')
+})
+
 test('resolveProviderRequest maps explicit route catalog aliases to API model ids', () => {
   const request = resolveProviderRequest({
     model: 'glm-5.2?reasoning=high',
@@ -35,6 +49,87 @@ test('resolveProviderRequest maps explicit route catalog aliases to API model id
   expect(request.requestedModel).toBe('glm-5.2?reasoning=high')
   expect(request.resolvedModel).toBe('zai-org/glm-5.2')
   expect(request.reasoning).toEqual({ effort: 'high' })
+})
+
+test('resolveProviderRequest maps K3 context catalog choices to the Kimi API model', () => {
+  for (const model of ['k3', 'k3-256k']) {
+    const request = resolveProviderRequest({
+      model,
+      baseUrl: 'https://api.kimi.com/coding/v1',
+      processEnv: {},
+    })
+    expect(request.resolvedModel).toBe('k3')
+  }
+})
+
+test('resolveProviderRequest maps K3 context choices against an explicit Kimi base URL', () => {
+  const request = resolveProviderRequest({
+    model: 'k3-256k',
+    baseUrl: 'https://api.kimi.com/coding/v1',
+    processEnv: {
+      CLAUDE_CODE_USE_OPENAI: '1',
+      OPENAI_BASE_URL: 'https://api.openai.com/v1',
+    },
+  })
+
+  expect(request.resolvedModel).toBe('k3')
+})
+
+test('resolveProviderRequest preserves K3 max reasoning from its model query', () => {
+  const request = resolveProviderRequest({
+    model: 'k3?reasoning=max',
+    baseUrl: 'https://api.kimi.com/coding/v1',
+    processEnv: {},
+  })
+
+  expect(request.requestedModel).toBe('k3?reasoning=max')
+  expect(request.resolvedModel).toBe('k3')
+  expect(request.reasoning).toEqual({ effort: 'max' })
+})
+
+test('resolveProviderRequest canonicalizes K3 model-query reasoning aliases', () => {
+  for (const [effort, expected] of [['low', 'low'], ['medium', 'high'], ['high', 'high'], ['xhigh', 'max'], ['max', 'max']] as const) {
+    const request = resolveProviderRequest({
+      model: `k3-256k?reasoning=${effort}`,
+      baseUrl: 'https://api.kimi.com/coding/v1',
+      processEnv: {},
+    })
+
+    expect(request.resolvedModel).toBe('k3')
+    expect(request.reasoning).toEqual({ effort: expected })
+  }
+})
+
+test('resolveProviderRequest maps direct Moonshot K3 reasoning aliases', () => {
+  for (const [effort, expected] of [['low', 'low'], ['medium', 'high'], ['high', 'high'], ['xhigh', 'max'], ['max', 'max']] as const) {
+    const request = resolveProviderRequest({
+      model: `kimi-k3?reasoning=${effort}`,
+      baseUrl: 'https://api.moonshot.ai/v1',
+      processEnv: {},
+    })
+    expect(request.resolvedModel).toBe('kimi-k3')
+    expect(request.reasoning).toEqual({ effort: expected })
+  }
+})
+
+test('resolveProviderRequest rejects max reasoning for models without K3 support', () => {
+  const request = resolveProviderRequest({
+    model: 'gpt-4o?reasoning=max',
+    baseUrl: 'https://api.openai.com/v1',
+    processEnv: {},
+  })
+
+  expect(request.reasoning).toBeUndefined()
+})
+
+test('resolveProviderRequest rejects K3 max reasoning outside a Kimi route', () => {
+  const request = resolveProviderRequest({
+    model: 'k3?reasoning=max',
+    baseUrl: 'https://api.openai.com/v1',
+    processEnv: {},
+  })
+
+  expect(request.reasoning).toBeUndefined()
 })
 
 test('resolveProviderRequest maps explicit Atlas coding aliases without ambiguity', () => {
