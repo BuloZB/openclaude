@@ -20,6 +20,7 @@ const originalEnv = {
   OPENAI_API_BASE: process.env.OPENAI_API_BASE,
   OPENAI_API_KEY: process.env.OPENAI_API_KEY,
   OPENAI_API_KEYS: process.env.OPENAI_API_KEYS,
+  LLMTR_API_KEY: process.env.LLMTR_API_KEY,
   OPENAI_MODEL: process.env.OPENAI_MODEL,
   OPENAI_API_FORMAT: process.env.OPENAI_API_FORMAT,
   OPENAI_AZURE_STYLE: process.env.OPENAI_AZURE_STYLE,
@@ -50,6 +51,9 @@ const originalEnv = {
   OPENROUTER_API_KEY: process.env.OPENROUTER_API_KEY,
   DEEPSEEK_API_KEY: process.env.DEEPSEEK_API_KEY,
   MIMO_API_KEY: process.env.MIMO_API_KEY,
+  CONCENTRATE_API_KEY: process.env.CONCENTRATE_API_KEY,
+  CONCENTRATE_BASE_URL: process.env.CONCENTRATE_BASE_URL,
+  CONCENTRATE_MODEL: process.env.CONCENTRATE_MODEL,
   OPENGATEWAY_API_KEY: process.env.OPENGATEWAY_API_KEY,
   OPENGATEWAY_BASE_URL: process.env.OPENGATEWAY_BASE_URL,
   OPENCODE_API_KEY: process.env.OPENCODE_API_KEY,
@@ -406,19 +410,25 @@ function makeChatCompletionResponse(model: string): Response {
 
 async function captureChatCompletionRequest(
   model = 'mimo-v2.5-pro',
-): Promise<{ authorization: string | null; url: string | null }> {
+  defaultHeaders: Record<string, string> = {},
+): Promise<{
+  authorization: string | null
+  headers: Record<string, string>
+  url: string | null
+}> {
   let authorization: string | null = null
+  let headers: Record<string, string> = {}
   let url: string | null = null
 
   globalThis.fetch = (async (input, init) => {
     url = String(input)
-    const headers = init?.headers as Record<string, string> | undefined
-    authorization = headers?.Authorization ?? headers?.authorization ?? null
+    headers = (init?.headers as Record<string, string> | undefined) ?? {}
+    authorization = headers.Authorization ?? headers.authorization ?? null
 
     return makeChatCompletionResponse(model)
   }) as unknown as FetchType
 
-  const client = createOpenAIShimClient({}) as OpenAIShimClient
+  const client = createOpenAIShimClient({ defaultHeaders }) as OpenAIShimClient
 
   await client.beta.messages.create({
     model,
@@ -427,7 +437,7 @@ async function captureChatCompletionRequest(
     stream: false,
   })
 
-  return { authorization, url }
+  return { authorization, headers, url }
 }
 
 function makeCodexSseResponse(responseData: Record<string, unknown>): Response {
@@ -441,6 +451,7 @@ beforeEach(async () => {
   delete process.env.OPENAI_API_BASE
   process.env.OPENAI_API_KEY = 'test-key'
   delete process.env.OPENAI_API_KEYS
+  delete process.env.LLMTR_API_KEY
   delete process.env.OPENAI_MODEL
   delete process.env.OPENAI_API_FORMAT
   delete process.env.OPENAI_AZURE_STYLE
@@ -471,6 +482,9 @@ beforeEach(async () => {
   delete process.env.OPENROUTER_API_KEY
   delete process.env.DEEPSEEK_API_KEY
   delete process.env.MIMO_API_KEY
+  delete process.env.CONCENTRATE_API_KEY
+  delete process.env.CONCENTRATE_BASE_URL
+  delete process.env.CONCENTRATE_MODEL
   delete process.env.OPENGATEWAY_API_KEY
   delete process.env.OPENGATEWAY_BASE_URL
   delete process.env.OPENCODE_API_KEY
@@ -487,6 +501,7 @@ afterEach(() => {
     restoreEnv('OPENAI_API_BASE', originalEnv.OPENAI_API_BASE)
     restoreEnv('OPENAI_API_KEY', originalEnv.OPENAI_API_KEY)
     restoreEnv('OPENAI_API_KEYS', originalEnv.OPENAI_API_KEYS)
+    restoreEnv('LLMTR_API_KEY', originalEnv.LLMTR_API_KEY)
     restoreEnv('OPENAI_MODEL', originalEnv.OPENAI_MODEL)
     restoreEnv('OPENAI_API_FORMAT', originalEnv.OPENAI_API_FORMAT)
     restoreEnv('OPENAI_AZURE_STYLE', originalEnv.OPENAI_AZURE_STYLE)
@@ -517,6 +532,9 @@ afterEach(() => {
     restoreEnv('OPENROUTER_API_KEY', originalEnv.OPENROUTER_API_KEY)
     restoreEnv('DEEPSEEK_API_KEY', originalEnv.DEEPSEEK_API_KEY)
     restoreEnv('MIMO_API_KEY', originalEnv.MIMO_API_KEY)
+    restoreEnv('CONCENTRATE_API_KEY', originalEnv.CONCENTRATE_API_KEY)
+    restoreEnv('CONCENTRATE_BASE_URL', originalEnv.CONCENTRATE_BASE_URL)
+    restoreEnv('CONCENTRATE_MODEL', originalEnv.CONCENTRATE_MODEL)
     restoreEnv('OPENGATEWAY_API_KEY', originalEnv.OPENGATEWAY_API_KEY)
     restoreEnv('OPENGATEWAY_BASE_URL', originalEnv.OPENGATEWAY_BASE_URL)
     restoreEnv('OPENCODE_API_KEY', originalEnv.OPENCODE_API_KEY)
@@ -545,6 +563,100 @@ test('gitlawb opengateway provider flag prefers OPENGATEWAY_API_KEY over generic
 
   expect(captured.url).toBe('http://localhost:8181/v1/chat/completions')
   expect(captured.authorization).toBe('Bearer fake-ogw-key')
+})
+
+test('Concentrate selection prefers its dedicated key over a generic OPENAI_API_KEYS pool', async () => {
+  process.env.CONCENTRATE_API_KEY = 'concentrate-key'
+  process.env.OPENAI_API_KEYS = 'generic-openai-key-a,generic-openai-key-b'
+  delete process.env.OPENAI_API_KEY
+
+  const result = applyProviderFlag('concentrate', [])
+  expect(result.error).toBeUndefined()
+
+  const captured = await captureChatCompletionRequest()
+
+  expect(captured.url).toBe('https://api.concentrate.ai/v1/chat/completions')
+  expect(captured.authorization).toBe('Bearer concentrate-key')
+})
+
+test('selected LLMTR route sends LLMTR_API_KEY through the generic route credential resolver', async () => {
+  process.env.LLMTR_API_KEY = 'llmtr-key'
+  delete process.env.OPENAI_API_KEYS
+  delete process.env.OPENAI_API_KEY
+  delete process.env.OPENAI_BASE_URL
+  delete process.env.OPENAI_MODEL
+
+  const result = applyProviderFlag('llmtr', [])
+  expect(result.error).toBeUndefined()
+
+  const captured = await captureChatCompletionRequest(
+    'deepseek/deepseek-v4-flash',
+  )
+
+  expect(captured.url).toBe('https://llmtr.com/v1/chat/completions')
+  expect(captured.authorization).toBe('Bearer llmtr-key')
+})
+
+test('selected LLMTR route prefers its dedicated key over a generic OPENAI_API_KEYS pool', async () => {
+  process.env.LLMTR_API_KEY = 'llmtr-key'
+  process.env.OPENAI_API_KEYS = 'generic-openai-key-a,generic-openai-key-b'
+  delete process.env.OPENAI_API_KEY
+  delete process.env.OPENAI_BASE_URL
+  delete process.env.OPENAI_MODEL
+
+  const result = applyProviderFlag('llmtr', [])
+  expect(result.error).toBeUndefined()
+
+  const captured = await captureChatCompletionRequest(
+    'deepseek/deepseek-v4-flash',
+  )
+
+  expect(captured.authorization).toBe('Bearer llmtr-key')
+})
+
+test('raw-env LLMTR ignores unsupported custom auth and custom headers', async () => {
+  process.env.CLAUDE_CODE_USE_OPENAI = '1'
+  process.env.OPENAI_BASE_URL = 'https://llmtr.com/v1'
+  process.env.OPENAI_MODEL = 'deepseek/deepseek-v4-flash'
+  process.env.LLMTR_API_KEY = 'llmtr-key'
+  process.env.OPENAI_AUTH_HEADER = 'X-Proxy-Key'
+  process.env.OPENAI_AUTH_SCHEME = 'raw'
+  process.env.OPENAI_AUTH_HEADER_VALUE = 'proxy-secret'
+  process.env.ANTHROPIC_CUSTOM_HEADERS = 'X-Tenant-Secret: tenant-secret'
+  delete process.env.OPENAI_API_KEYS
+  delete process.env.OPENAI_API_KEY
+
+  const captured = await captureChatCompletionRequest(
+    'deepseek/deepseek-v4-flash',
+    { 'X-Tenant-Secret': 'tenant-secret' },
+  )
+
+  expect(captured.url).toBe('https://llmtr.com/v1/chat/completions')
+  expect(captured.authorization).toBe('Bearer llmtr-key')
+  expect(captured.headers['X-Proxy-Key']).toBeUndefined()
+  expect(captured.headers['X-Tenant-Secret']).toBeUndefined()
+})
+
+test('custom endpoints preserve configured auth and custom headers', async () => {
+  process.env.CLAUDE_CODE_USE_OPENAI = '1'
+  process.env.OPENAI_BASE_URL = 'https://proxy.example/v1'
+  process.env.OPENAI_MODEL = 'proxy-model'
+  process.env.LLMTR_API_KEY = 'llmtr-key'
+  process.env.OPENAI_AUTH_HEADER = 'X-Proxy-Key'
+  process.env.OPENAI_AUTH_SCHEME = 'raw'
+  process.env.OPENAI_AUTH_HEADER_VALUE = 'proxy-secret'
+  process.env.ANTHROPIC_CUSTOM_HEADERS = 'X-Tenant-Secret: tenant-secret'
+  delete process.env.OPENAI_API_KEYS
+  delete process.env.OPENAI_API_KEY
+
+  const captured = await captureChatCompletionRequest('proxy-model', {
+    'X-Tenant-Secret': 'tenant-secret',
+  })
+
+  expect(captured.url).toBe('https://proxy.example/v1/chat/completions')
+  expect(captured.authorization).toBeNull()
+  expect(captured.headers['X-Proxy-Key']).toBe('proxy-secret')
+  expect(captured.headers['X-Tenant-Secret']).toBe('tenant-secret')
 })
 
 test('gitlawb opengateway provider flag uses generic OPENAI_API_KEYS pool before generic OPENAI_API_KEY fallback', async () => {
@@ -585,7 +697,7 @@ test('OPENAI_API_KEYS rejects placeholder values before sending requests', async
       max_tokens: 32,
       stream: false,
     }),
-  ).rejects.toThrow(/SUA_CHAVE|Authentication failed/)
+  ).rejects.toThrow(/invalid credential placeholder|Authentication failed/)
 
   expect(authorizations).toEqual([])
 })

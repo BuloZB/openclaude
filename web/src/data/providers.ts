@@ -141,6 +141,14 @@ export const providers: Provider[] = [
     notes: 'OpenAI-compatible aggregation across hundreds of hosted models.',
   },
   {
+    id: 'llmtr',
+    name: 'LLMTR',
+    group: 'gateways',
+    setup: '/provider or OpenAI-compatible env vars',
+    envVars: ['LLMTR_API_KEY', 'OPENAI_API_KEY'],
+    notes: '/provider and --provider llmtr default to deepseek/deepseek-v4-flash; raw env setup must set OPENAI_BASE_URL=https://llmtr.com/v1 and OPENAI_MODEL. Uses public discovery of tool-capable chat models.',
+  },
+  {
     id: 'near-ai',
     name: 'NEAR AI',
     group: 'gateways',
@@ -189,6 +197,14 @@ export const providers: Provider[] = [
     notes: 'OpenAI-compatible hosted open models with reasoning support at https://api.atlascloud.ai/v1.',
   },
   {
+    id: 'apismart',
+    name: 'ApiSmart',
+    group: 'gateways',
+    setup: '/provider or env vars',
+    envVars: ['APISMART_API_KEY', 'APISMART_MODEL'],
+    notes: 'Unified OpenAI-compatible gateway at https://gw.apismart.ai/v1; defaults to DEEPSEEK_V4_FLASH with hybrid /v1/models discovery.',
+  },
+  {
     id: 'cloudflare',
     name: 'Cloudflare Workers AI',
     group: 'gateways',
@@ -228,7 +244,7 @@ export const providers: Provider[] = [
     group: 'vendors',
     setup: '/provider or env vars',
     envVars: ['XAI_API_KEY'],
-    notes: 'Grok models at https://api.x.ai/v1; defaults to grok-4.3.',
+    notes: 'Grok models at https://api.x.ai/v1; defaults to grok-4.6.',
   },
   {
     id: 'deepseek',
